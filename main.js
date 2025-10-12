@@ -764,21 +764,15 @@ module.exports = class TableColorPlugin extends Plugin {
           const colorData = tableColors[rowKey]?.[colKey];
           cell.style.backgroundColor = "";
           cell.style.color = "";
-          if (colorData) {
-            if (colorData.bg) cell.style.backgroundColor = colorData.bg;
-            if (colorData.color) cell.style.color = colorData.color;
-          }
-          // Text match rules
+          // Apply rule-based coloring first
           this.settings.rules.forEach(rule => {
             if (cell.textContent.includes(rule.match)) {
               if (rule.bg) cell.style.backgroundColor = rule.bg;
               if (rule.color) cell.style.color = rule.color;
             }
           });
-          // Numeric rules
           if (this.settings.numericRules && this.settings.numericRules.length) {
             let text = cell.textContent.trim();
-            // If strict, only match if the cell is a pure number (optionally with commas, decimal, or minus)
             let isNumber = false;
             if (this.settings.numericStrict) {
               isNumber = /^-?\d{1,3}(,\d{3})*(\.\d+)?$|^-?\d+(\.\d+)?$/.test(text);
@@ -799,10 +793,15 @@ module.exports = class TableColorPlugin extends Plugin {
                 if (match) {
                   if (nRule.bg) cell.style.backgroundColor = nRule.bg;
                   if (nRule.color) cell.style.color = nRule.color;
-                  break; // Only apply first matching rule
+                  break;
                 }
               }
             }
+          }
+          // Now apply single cell coloring so it overrides rule-based coloring
+          if (colorData) {
+            if (colorData.bg) cell.style.backgroundColor = colorData.bg;
+            if (colorData.color) cell.style.color = colorData.color;
           }
         });
       });
