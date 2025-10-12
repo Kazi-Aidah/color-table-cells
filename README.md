@@ -73,7 +73,4 @@ When you open the note, the plugin finds them and restores the colors automatica
 ---
 
 ### Does it work on Mobile Obsidian?
-Yes! The colors show up on mobile too.
-**However, there are a few issues for now:**
-- The Single Cell Colours don't get added or appear on mobile, but Rule Colouring works fine.
-  (I will try to fix this.)
+Yes! The colors show up on mobile too. Both the Rules and the Single Cell Colouring, woohoo!
