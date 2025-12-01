@@ -1,6 +1,17 @@
 const { Plugin, PluginSettingTab, Setting, Menu, ButtonComponent, Modal } = require('obsidian');
 
+// Debug configuration
+const debugMode = false;
+
+// Debug logging helper - removed to follow guidelines
+const debugLog = () => {};
+
 module.exports = class TableColorPlugin extends Plugin {
+  // Undo/redo stacks
+  undoStack = [];
+  redoStack = [];
+  maxStackSize = 50;
+
   async onload() {
     // COMMAND PALETTE COMMANDS
     this.addCommand({
@@ -36,6 +47,34 @@ module.exports = class TableColorPlugin extends Plugin {
       }
     });
     this.addCommand({
+      id: 'undo-color-change',
+      name: 'Undo Last Color Change',
+      hotkeys: [
+        {
+          modifiers: ["Ctrl"],
+          key: "z"
+        }
+      ],
+      callback: () => this.undo()
+    });
+
+    this.addCommand({
+      id: 'redo-color-change',
+      name: 'Redo Last Color Change',
+      hotkeys: [
+        {
+          modifiers: ["Ctrl"],
+          key: "y"
+        },
+        {
+          modifiers: ["Ctrl", "Shift"],
+          key: "z"
+        }
+      ],
+      callback: () => this.redo()
+    });
+
+    this.addCommand({
       id: 'add-cell-color-rule',
       name: 'Add Table Cell Color Rule',
       callback: () => {
@@ -46,6 +85,14 @@ module.exports = class TableColorPlugin extends Plugin {
             this.app.setting.openTabById('color-table-cell');
           }
         }, 250);
+      }
+    });
+
+    this.addCommand({
+      id: 'open-regex-tester',
+      name: 'Open Regex Pattern Tester',
+      callback: () => {
+        new RegexTesterModal(this.app, this).open();
       }
     });
 
@@ -102,9 +149,7 @@ module.exports = class TableColorPlugin extends Plugin {
     await this.loadSettings();
     // Setup Live Preview coloring if enabled (after settings loaded)
     setupLivePreviewColoring();
-    console.log("Table Color Plugin loaded");
-
-    const rawSaved = await this.loadData() || {};
+      // Plugin loaded    const rawSaved = await this.loadData() || {};
 
     this._appliedContainers = new WeakMap();
 
@@ -151,9 +196,9 @@ module.exports = class TableColorPlugin extends Plugin {
       const normStr = JSON.stringify(normalizedSave || {});
       if (rawStr !== normStr) {
         await this.saveData(normalizedSave);
-        console.log('color-table-cell: migrated and saved normalized plugin data');
+        debugLog('color-table-cell: migrated and saved normalized plugin data');
       }
-    } catch (e) { console.warn('color-table-cell: migration failed', e); }
+    } catch (e) { /* ignore migration errors */ }
 
     if (!this._settingsTab) {
       this._settingsTab = new ColorTableSettingTab(this.app, this);
@@ -163,15 +208,19 @@ module.exports = class TableColorPlugin extends Plugin {
     this.registerMarkdownPostProcessor((el, ctx) => {
       if (!el.closest('.markdown-preview-view')) return;
       const fileId = ctx.sourcePath;
-      console.log('color-table-cell: post-processor running for', fileId, 'tables=', el.querySelectorAll ? el.querySelectorAll('table').length : 0);
-  this.applyColorsToContainer(el, fileId);
+      this.applyColorsToContainer(el, fileId);
 
       try {
         let observer = null;
         let debounceId = null;
+        let scrollListener = null;
+        let scrollDebounceId = null;
+        
         const safeDisconnect = () => {
           try { if (observer) { observer.disconnect(); observer = null; } } catch (e) { }
           try { if (debounceId) { clearTimeout(debounceId); debounceId = null; } } catch (e) { }
+          try { if (scrollListener && el.parentElement) { el.parentElement.removeEventListener('scroll', scrollListener); } } catch (e) { }
+          try { if (scrollDebounceId) { clearTimeout(scrollDebounceId); scrollDebounceId = null; } } catch (e) { }
         };
 
         const checkAndApply = () => {
@@ -186,7 +235,6 @@ module.exports = class TableColorPlugin extends Plugin {
         observer = new MutationObserver((mutations) => {
           if (debounceId) clearTimeout(debounceId);
           debounceId = setTimeout(() => {
-            console.log('color-table-cell: post-processor observer triggered for', fileId, 'tables now=', el.querySelectorAll('table').length);
             checkAndApply();
           }, 80);
         });
@@ -195,7 +243,20 @@ module.exports = class TableColorPlugin extends Plugin {
 
         checkAndApply();
 
-        setTimeout(() => { safeDisconnect(); }, 3000);
+        // Add scroll listener to reapply colors on scroll
+        try {
+          const scrollContainer = el.parentElement || el;
+          scrollListener = () => {
+            if (scrollDebounceId) clearTimeout(scrollDebounceId);
+            scrollDebounceId = setTimeout(() => {
+              this.applyColorsToContainer(el, fileId);
+            }, 100);
+          };
+          scrollContainer.addEventListener('scroll', scrollListener, { passive: true });
+        } catch (e) { /* ignore if scroll listener fails */ }
+
+        // Keep observer alive for longer to catch dynamic content
+        setTimeout(() => { safeDisconnect(); }, 10000);
       } catch (e) { /* ignore if MutationObserver unsupported */ }
     });
 
@@ -219,6 +280,29 @@ module.exports = class TableColorPlugin extends Plugin {
               .setIcon('droplet')
               .onClick(() => this.pickColor(cell, tableEl, "bg"))
         );
+        menu.addSeparator();
+        menu.addItem(item =>
+          item.setTitle("Color Whole Row Text")
+              .setIcon('rows-3')
+              .onClick(() => this.pickColorForRow(cell, tableEl, "color"))
+        );
+        menu.addItem(item =>
+          item.setTitle("Color Whole Row Background")
+              .setIcon('droplet')
+              .onClick(() => this.pickColorForRow(cell, tableEl, "bg"))
+        );
+        menu.addSeparator();
+        menu.addItem(item =>
+          item.setTitle("Color Whole Column Text")
+              .setIcon('columns-3')
+              .onClick(() => this.pickColorForColumn(cell, tableEl, "color"))
+        );
+        menu.addItem(item =>
+          item.setTitle("Color Whole Column Background")
+              .setIcon('droplet')
+              .onClick(() => this.pickColorForColumn(cell, tableEl, "bg"))
+        );
+        menu.addSeparator();
         menu.addItem(item =>
           item.setTitle("Color Multiple Cells by Rule")
               .setIcon('grid')
@@ -231,6 +315,20 @@ module.exports = class TableColorPlugin extends Plugin {
                 }, 250);
               })
         );
+        menu.addSeparator();
+        menu.addItem(item =>
+          item.setTitle("Undo Last Color Change")
+              .setIcon('undo')
+              .setDisabled(this.undoStack.length === 0)
+              .onClick(() => this.undo())
+        );
+        menu.addItem(item =>
+          item.setTitle("Redo Last Color Change")
+              .setIcon('redo')
+              .setDisabled(this.redoStack.length === 0)
+              .onClick(() => this.redo())
+        );
+        menu.addSeparator();
         menu.addItem(item =>
           item.setTitle("Reset Cell Coloring")
               .setIcon('trash-2')
@@ -259,6 +357,13 @@ module.exports = class TableColorPlugin extends Plugin {
         this.applyColorsToActiveFile();
       })
     );
+
+    // Also listen to active leaf changes to catch view switches
+    this.registerEvent(
+      this.app.workspace.on('active-leaf-change', () => {
+        setTimeout(() => this.applyColorsToActiveFile(), 50);
+      })
+    );
   }
 
   onunload() {
@@ -276,7 +381,6 @@ module.exports = class TableColorPlugin extends Plugin {
 
   async loadSettings() {
     const data = await this.loadData();
-    console.log('Loading data:', data);
     this.settings = Object.assign({
       defaultBgColor: "#331717",
       defaultTextColor: "#ffb2b2",
@@ -287,26 +391,22 @@ module.exports = class TableColorPlugin extends Plugin {
       numericStrict: true, // Only apply numeric rules to pure numbers
   livePreviewColoring: false, // Table coloring in Live Preview mode
     }, data?.settings || {});
-    console.log('Settings after load:', this.settings);
   }
 
   async saveSettings() {
     try {
-      console.log('Saving settings:', this.settings);
       const dataToSave = {
         settings: this.settings,
         cellData: this.cellData
       };
       await this.saveData(dataToSave);
-      console.log('Saved data:', dataToSave);
     } catch (error) {
-      console.error('Error saving settings:', error);
       throw error;
     }
     }
 
-  async pickColor(cell, tableEl, type) {
-
+  // Color Picker Menu Class
+  createColorPickerMenu() {
     // Floating color picker menu
     class CustomColorPickerMenu {
       constructor(plugin, onPick, initialColor, anchorEl) {
@@ -320,6 +420,7 @@ module.exports = class TableColorPlugin extends Plugin {
         this.val = v;
         this.color = this.hsvToHex(this.hue, this.sat, this.val);
         this.menuEl = null;
+        this._cells = []; // Support multiple cells for row/column coloring
       }
       open() {
         this.close();
@@ -504,6 +605,13 @@ module.exports = class TableColorPlugin extends Plugin {
             if (this._type === 'bg') this._cell.style.backgroundColor = this.color;
             else this._cell.style.color = this.color;
           }
+          // Support for multiple cells (row/column)
+          if (this._cells && this._cells.length > 0 && this._type) {
+            this._cells.forEach(cell => {
+              if (this._type === 'bg') cell.style.backgroundColor = this.color;
+              else cell.style.color = this.color;
+            });
+          }
         };
         let sbDragging = false;
         sbBox.addEventListener('mousedown', (e) => {
@@ -539,6 +647,13 @@ module.exports = class TableColorPlugin extends Plugin {
           if (this._cell && this._type) {
             if (this._type === 'bg') this._cell.style.backgroundColor = this.color;
             else this._cell.style.color = this.color;
+          }
+          // Support for multiple cells (row/column)
+          if (this._cells && this._cells.length > 0 && this._type) {
+            this._cells.forEach(cell => {
+              if (this._type === 'bg') cell.style.backgroundColor = this.color;
+              else cell.style.color = this.color;
+            });
           }
           drawSB(this.hue);
         };
@@ -639,7 +754,11 @@ module.exports = class TableColorPlugin extends Plugin {
         return {h, s, v};
       }
     }
+    return CustomColorPickerMenu;
+  }
 
+  async pickColor(cell, tableEl, type) {
+    const CustomColorPickerMenu = this.createColorPickerMenu();
     const initialColor = type === 'bg' ? this.settings.defaultBgColor : this.settings.defaultTextColor;
     // Use the cell as anchor for menu position
     const menu = new CustomColorPickerMenu(this, async (pickedColor) => {
@@ -650,6 +769,10 @@ module.exports = class TableColorPlugin extends Plugin {
       const tableIndex = allTables.indexOf(tableEl);
       const rowIndex = Array.from(tableEl.querySelectorAll('tr')).indexOf(cell.closest('tr'));
       const colIndex = Array.from(cell.closest('tr').querySelectorAll('td, th')).indexOf(cell);
+      
+      // Capture current state for undo
+      const oldColors = this.cellData[fileId]?.[`table_${tableIndex}`]?.[`row_${rowIndex}`]?.[`col_${colIndex}`];
+      
       if (!this.cellData[fileId]) this.cellData[fileId] = {};
       const noteData = this.cellData[fileId];
       const tableKey = `table_${tableIndex}`;
@@ -658,13 +781,157 @@ module.exports = class TableColorPlugin extends Plugin {
       const rowKey = `row_${rowIndex}`;
       if (!tableColors[rowKey]) tableColors[rowKey] = {};
       const colKey = `col_${colIndex}`;
-      tableColors[rowKey][colKey] = {
+      
+      const newColors = {
         ...tableColors[rowKey][colKey],
         [type]: pickedColor
       };
+      
+      tableColors[rowKey][colKey] = newColors;
+      
+      // Add to undo stack
+      const snapshot = this.createSnapshot(
+        'cell_color',
+        fileId,
+        tableIndex,
+        { row: rowIndex, col: colIndex },
+        oldColors,
+        newColors
+      );
+      this.addToUndoStack(snapshot);
+      
       await this.saveDataColors();
     }, initialColor, cell);
     menu._cell = cell;
+    menu._type = type;
+    menu.open();
+  }
+
+  async pickColorForRow(cell, tableEl, type) {
+    const CustomColorPickerMenu = this.createColorPickerMenu();
+    const initialColor = type === 'bg' ? this.settings.defaultBgColor : this.settings.defaultTextColor;
+    const row = cell.closest('tr');
+    const rowCells = Array.from(row.querySelectorAll('td, th'));
+    
+    const menu = new CustomColorPickerMenu(this, async (pickedColor) => {
+      // Save color on close for entire row
+      const fileId = this.app.workspace.getActiveFile()?.path;
+      if (!fileId) return;
+      const allTables = Array.from(tableEl.closest('.markdown-preview-section, .markdown-preview-view')?.querySelectorAll('table') || tableEl.ownerDocument.querySelectorAll('table'));
+      const tableIndex = allTables.indexOf(tableEl);
+      const rowIndex = Array.from(tableEl.querySelectorAll('tr')).indexOf(row);
+      
+      // Capture current state for undo
+      const oldColors = this.cellData[fileId]?.[`table_${tableIndex}`]?.[`row_${rowIndex}`];
+      
+      if (!this.cellData[fileId]) this.cellData[fileId] = {};
+      const noteData = this.cellData[fileId];
+      const tableKey = `table_${tableIndex}`;
+      if (!noteData[tableKey]) noteData[tableKey] = {};
+      const tableColors = noteData[tableKey];
+      const rowKey = `row_${rowIndex}`;
+      if (!tableColors[rowKey]) tableColors[rowKey] = {};
+      
+      // Color all cells in the row
+      const newColors = {};
+      rowCells.forEach((rowCell, colIndex) => {
+        const colKey = `col_${colIndex}`;
+        newColors[colKey] = {
+          ...tableColors[rowKey][colKey],
+          [type]: pickedColor
+        };
+        tableColors[rowKey][colKey] = newColors[colKey];
+      });
+      
+      // Add to undo stack
+      const snapshot = this.createSnapshot(
+        'row_color',
+        fileId,
+        tableIndex,
+        { row: rowIndex },
+        oldColors,
+        newColors
+      );
+      this.addToUndoStack(snapshot);
+      
+      await this.saveDataColors();
+    }, initialColor, cell);
+    
+    menu._cells = rowCells;
+    menu._type = type;
+    menu.open();
+  }
+
+  async pickColorForColumn(cell, tableEl, type) {
+    const CustomColorPickerMenu = this.createColorPickerMenu();
+    const initialColor = type === 'bg' ? this.settings.defaultBgColor : this.settings.defaultTextColor;
+    const colIndex = Array.from(cell.closest('tr').querySelectorAll('td, th')).indexOf(cell);
+    
+    // Collect all cells in the column for preview
+    const columnCells = [];
+    tableEl.querySelectorAll('tr').forEach((row) => {
+      const cells = row.querySelectorAll('td, th');
+      if (colIndex < cells.length) {
+        columnCells.push(cells[colIndex]);
+      }
+    });
+    
+    const menu = new CustomColorPickerMenu(this, async (pickedColor) => {
+      // Save color on close for entire column
+      const fileId = this.app.workspace.getActiveFile()?.path;
+      if (!fileId) return;
+      const allTables = Array.from(tableEl.closest('.markdown-preview-section, .markdown-preview-view')?.querySelectorAll('table') || tableEl.ownerDocument.querySelectorAll('table'));
+      const tableIndex = allTables.indexOf(tableEl);
+      
+      // Capture current state for undo
+      const oldColors = {};
+      if (this.cellData[fileId]?.[`table_${tableIndex}`]) {
+        Object.entries(this.cellData[fileId][`table_${tableIndex}`]).forEach(([rowKey, rowData]) => {
+          if (rowKey.startsWith('row_') && rowData[`col_${colIndex}`]) {
+            oldColors[rowKey] = { ...oldColors[rowKey] };
+            oldColors[rowKey][`col_${colIndex}`] = { ...rowData[`col_${colIndex}`] };
+          }
+        });
+      }
+      
+      if (!this.cellData[fileId]) this.cellData[fileId] = {};
+      const noteData = this.cellData[fileId];
+      const tableKey = `table_${tableIndex}`;
+      if (!noteData[tableKey]) noteData[tableKey] = {};
+      const tableColors = noteData[tableKey];
+      
+      // Color all cells in the column
+      const newColors = {};
+      tableEl.querySelectorAll('tr').forEach((row, rowIndex) => {
+        const cells = row.querySelectorAll('td, th');
+        if (colIndex < cells.length) {
+          const rowKey = `row_${rowIndex}`;
+          if (!tableColors[rowKey]) tableColors[rowKey] = {};
+          const colKey = `col_${colIndex}`;
+          newColors[rowKey] = { ...newColors[rowKey] };
+          newColors[rowKey][colKey] = {
+            ...tableColors[rowKey][colKey],
+            [type]: pickedColor
+          };
+          tableColors[rowKey][colKey] = newColors[rowKey][colKey];
+        }
+      });
+      
+      // Add to undo stack
+      const snapshot = this.createSnapshot(
+        'column_color',
+        fileId,
+        tableIndex,
+        { col: colIndex },
+        oldColors,
+        newColors
+      );
+      this.addToUndoStack(snapshot);
+      
+      await this.saveDataColors();
+    }, initialColor, cell);
+    
+    menu._cells = columnCells;
     menu._type = type;
     menu.open();
   }
@@ -709,10 +976,173 @@ module.exports = class TableColorPlugin extends Plugin {
   this.applyColorsToActiveFile();
   }
 
+  // Create snapshot of current state for undo/redo
+  createSnapshot(operationType, filePath, tableIndex, coordinates, oldColors, newColors) {
+    return {
+      timestamp: Date.now(),
+      operationType,
+      filePath,
+      tableIndex,
+      coordinates,
+      oldColors,
+      newColors
+    };
+  }
+
+  // Add operation to undo stack
+  addToUndoStack(snapshot) {
+    this.undoStack.push(snapshot);
+    // Clear redo stack when new operation is performed
+    this.redoStack = [];
+    // Limit stack size
+    if (this.undoStack.length > this.maxStackSize) {
+      this.undoStack.shift();
+    }
+  }
+
+  // Undo last operation
+  async undo() {
+    if (this.undoStack.length === 0) return;
+    
+    const snapshot = this.undoStack.pop();
+    this.redoStack.push(snapshot);
+    
+    // Apply the reverse operation
+    const { filePath, tableIndex, coordinates, oldColors } = snapshot;
+    
+    if (!this.cellData[filePath]) this.cellData[filePath] = {};
+    const noteData = this.cellData[filePath];
+    const tableKey = `table_${tableIndex}`;
+    
+    if (!noteData[tableKey]) noteData[tableKey] = {};
+    const tableColors = noteData[tableKey];
+    
+    // Restore old colors
+    if (coordinates.row !== undefined && coordinates.col !== undefined) {
+      // Single cell operation
+      const rowKey = `row_${coordinates.row}`;
+      if (!tableColors[rowKey]) tableColors[rowKey] = {};
+      const colKey = `col_${coordinates.col}`;
+      
+      if (oldColors) {
+        tableColors[rowKey][colKey] = { ...oldColors };
+      } else {
+        delete tableColors[rowKey][colKey];
+      }
+    } else if (coordinates.row !== undefined) {
+      // Row operation
+      const rowKey = `row_${coordinates.row}`;
+      if (oldColors) {
+        tableColors[rowKey] = { ...oldColors };
+      } else {
+        delete tableColors[rowKey];
+      }
+    } else if (coordinates.col !== undefined) {
+      // Column operation - need to iterate through all rows
+      for (const [rowKey, rowData] of Object.entries(tableColors)) {
+        if (rowKey.startsWith('row_')) {
+          const colKey = `col_${coordinates.col}`;
+          if (oldColors && oldColors[rowKey]) {
+            rowData[colKey] = { ...oldColors[rowKey][colKey] };
+          } else {
+            delete rowData[colKey];
+          }
+        }
+      }
+    }
+    
+    await this.saveDataColors();
+  }
+
+  // Redo last undone operation
+  async redo() {
+    if (this.redoStack.length === 0) return;
+    
+    const snapshot = this.redoStack.pop();
+    this.undoStack.push(snapshot);
+    
+    // Apply the original operation
+    const { filePath, tableIndex, coordinates, newColors } = snapshot;
+    
+    if (!this.cellData[filePath]) this.cellData[filePath] = {};
+    const noteData = this.cellData[filePath];
+    const tableKey = `table_${tableIndex}`;
+    
+    if (!noteData[tableKey]) noteData[tableKey] = {};
+    const tableColors = noteData[tableKey];
+    
+    // Apply new colors
+    if (coordinates.row !== undefined && coordinates.col !== undefined) {
+      // Single cell operation
+      const rowKey = `row_${coordinates.row}`;
+      if (!tableColors[rowKey]) tableColors[rowKey] = {};
+      const colKey = `col_${coordinates.col}`;
+      
+      if (newColors) {
+        tableColors[rowKey][colKey] = { ...newColors };
+      } else {
+        delete tableColors[rowKey][colKey];
+      }
+    } else if (coordinates.row !== undefined) {
+      // Row operation
+      const rowKey = `row_${coordinates.row}`;
+      if (newColors) {
+        tableColors[rowKey] = { ...newColors };
+      } else {
+        delete tableColors[rowKey];
+      }
+    } else if (coordinates.col !== undefined) {
+      // Column operation - need to iterate through all rows
+      for (const [rowKey, rowData] of Object.entries(tableColors)) {
+        if (rowKey.startsWith('row_')) {
+          const colKey = `col_${coordinates.col}`;
+          if (newColors && newColors[rowKey]) {
+            rowData[colKey] = { ...newColors[rowKey][colKey] };
+          } else {
+            delete rowData[colKey];
+          }
+        }
+      }
+    }
+    
+    await this.saveDataColors();
+  }
+
   // Apply rule and saved colors to a DOM container
+  // Helper function to get visible text content from a cell, excluding editor markup and cursors
+  getCellText(cell) {
+    // For table cells in reading mode
+    let text = '';
+    
+    // Get text from all child nodes, excluding editor elements
+    const walkNodes = (node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        text += node.textContent;
+      } else if (node.nodeType === Node.ELEMENT_NODE) {
+        // Skip CodeMirror cursor and editor elements
+        if (node.classList && (node.classList.contains('cm-cursor') || node.classList.contains('cm-line'))) {
+          return; // Skip editor cursors
+        }
+        // Include br tags as newlines
+        if (node.tagName === 'BR') {
+          text += '\n';
+        } else {
+          // Recurse into child nodes
+          for (let child of node.childNodes) {
+            walkNodes(child);
+          }
+        }
+      }
+    };
+    
+    for (let node of cell.childNodes) {
+      walkNodes(node);
+    }
+    
+    return text.trim();
+  }
+
   applyColorsToContainer(container, filePath) {
-    // Debug: log context
-    console.log('color-table-cell: applyColorsToContainer invoked for', filePath, 'containerHasTables=', container && container.querySelectorAll ? container.querySelectorAll('table').length : 0);
     // Only apply colors in Reading mode or Live Preview if enabled
     const hasClosest = typeof container.closest === 'function';
     const inPreview = hasClosest && !!container.closest('.markdown-preview-view');
@@ -737,13 +1167,11 @@ module.exports = class TableColorPlugin extends Plugin {
         if (this.settings.livePreviewColoring && container.classList && container.classList.contains('cm-content')) {
           // ok
         } else {
-          console.log('color-table-cell: applyColorsToContainer aborted: not within a preview/editor container');
           return;
         }
       }
     }
     if (inEditor && !this.settings.livePreviewColoring) {
-      console.log('color-table-cell: applyColorsToContainer aborted: container is inside editor (live preview) and setting is disabled');
       return;
     }
     // In Live Preview, always re-apply colors
@@ -751,9 +1179,7 @@ module.exports = class TableColorPlugin extends Plugin {
     if (!inPreview && !inEditor && !(container.classList && container.classList.contains('cm-content'))) {
       return;
     }
-    console.log('color-table-cell: applyColorsToContainer running for', filePath);
     const noteData = this.cellData[filePath] || {};
-    console.log('color-table-cell: noteData keys for file=', Object.keys(noteData || {}).length);
     container.querySelectorAll("table").forEach((tableEl, tableIndex) => {
       const tableKey = `table_${tableIndex}`;
       const tableColors = noteData[tableKey] || {};
@@ -762,17 +1188,49 @@ module.exports = class TableColorPlugin extends Plugin {
         tr.querySelectorAll("td, th").forEach((cell, colIndex) => {
           const colKey = `col_${colIndex}`;
           const colorData = tableColors[rowKey]?.[colKey];
-          cell.style.backgroundColor = "";
-          cell.style.color = "";
+          
+          // Get clean cell text without editor markup
+          const cellText = this.getCellText(cell);
+          
+          // Preserve existing colors if colors are already applied
+          const hasExistingStyles = cell.style.backgroundColor || cell.style.color;
+          
+          // Clear colors only if we're not in the middle of applying them
+          if (!hasExistingStyles) {
+            cell.style.backgroundColor = "";
+            cell.style.color = "";
+          }
+          
           // Apply rule-based coloring first
           this.settings.rules.forEach(rule => {
-            if (cell.textContent.includes(rule.match)) {
+            let matches = false;
+            try {
+              if (rule.regex) {
+                // Use regex pattern matching
+                const flags = rule.caseSensitive ? 'g' : 'gi';
+                const regex = new RegExp(rule.match, flags);
+                matches = regex.test(cellText);
+              } else {
+                // Use simple text matching
+                if (rule.caseSensitive) {
+                  matches = cellText.includes(rule.match);
+                } else {
+                  matches = cellText.toLowerCase().includes(rule.match.toLowerCase());
+                }
+              }
+            } catch (e) {
+              // Fallback to simple includes on regex error
+              matches = cellText.includes(rule.match);
+            }
+            
+            if (matches) {
               if (rule.bg) cell.style.backgroundColor = rule.bg;
               if (rule.color) cell.style.color = rule.color;
             }
           });
+          
           if (this.settings.numericRules && this.settings.numericRules.length) {
-            let text = cell.textContent.trim();
+            let text = cellText.trim();
             let isNumber = false;
             if (this.settings.numericStrict) {
               isNumber = /^-?\d{1,3}(,\d{3})*(\.\d+)?$|^-?\d+(\.\d+)?$/.test(text);
@@ -806,16 +1264,15 @@ module.exports = class TableColorPlugin extends Plugin {
         });
       });
     });
-    // In Reading mode, only re-apply a few times if tables are missing
+    // In Reading mode, retry applying colors with escalating delays if needed
     try {
       const prev = this._appliedContainers.get(container) || 0;
-      const delays = [120, 300, 800];
+      const delays = [100, 200, 400, 800];
       if (prev < delays.length) {
         this._appliedContainers.set(container, prev + 1);
         setTimeout(() => {
           // Only retry if still connected to DOM
           if (container.isConnected) {
-            // In Live Preview, always re-apply
             this.applyColorsToContainer(container, filePath);
           }
         }, delays[prev]);
@@ -827,12 +1284,104 @@ module.exports = class TableColorPlugin extends Plugin {
     const activeView = this.app.workspace.getActiveViewOfType(require('obsidian').MarkdownView);
     const filePath = this.app.workspace.getActiveFile()?.path;
     if (!activeView || !filePath) return;
-    // Only apply in Reading mode or Live Preview if enabled
-  const previewEl = activeView.contentEl.querySelector('.markdown-preview-view');
-    if (!previewEl) return;
-    this.applyColorsToContainer(previewEl, filePath);
+    
+    // Try to find preview element with retries, as it may not be rendered yet
+    let attempts = 0;
+    const maxAttempts = 8;
+    const tryApplyColors = () => {
+      attempts++;
+      const previewEl = activeView.contentEl.querySelector('.markdown-preview-view');
+      if (previewEl) {
+        this.applyColorsToContainer(previewEl, filePath);
+      } else if (attempts < maxAttempts) {
+        // Retry with increasing delays
+        const delay = attempts <= 3 ? 50 : (attempts <= 5 ? 100 : 200);
+        setTimeout(tryApplyColors, delay);
+      }
+    };
+    tryApplyColors();
   }
 };
+
+// Regex Tester Modal
+class RegexTesterModal extends Modal {
+  constructor(app, plugin) {
+    super(app);
+    this.plugin = plugin;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl('h2', { text: 'Regex Pattern Tester' });
+    
+    const patternDiv = contentEl.createDiv({ cls: 'regex-tester-section' });
+    patternDiv.createEl('label', { text: 'Pattern:' });
+    const patternInput = patternDiv.createEl('input', { type: 'text', cls: 'regex-pattern-input', attr: { placeholder: 'Enter regex pattern' } });
+    
+    const flagsDiv = contentEl.createDiv({ cls: 'regex-tester-section' });
+    flagsDiv.createEl('label', { text: 'Flags:' });
+    const flagsInput = flagsDiv.createEl('input', { type: 'text', value: 'gi', cls: 'regex-flags-input' });
+    
+    const testDiv = contentEl.createDiv({ cls: 'regex-tester-section' });
+    testDiv.createEl('label', { text: 'Test Text:' });
+    const testInput = testDiv.createEl('textarea', { cls: 'regex-test-input', attr: { placeholder: 'Enter text to test' } });
+    
+    const resultDiv = contentEl.createDiv({ cls: 'regex-test-result' });
+    
+    const testPattern = () => {
+      resultDiv.empty();
+      if (!patternInput.value.trim()) {
+        resultDiv.createEl('div', { text: 'Enter a pattern to test', cls: 'test-info' });
+        return;
+      }
+      
+      try {
+        const regex = new RegExp(patternInput.value, flagsInput.value);
+        const matches = testInput.value.match(regex);
+        
+        if (matches && matches.length > 0) {
+          const successDiv = resultDiv.createEl('div', { cls: 'test-success' });
+          successDiv.createEl('div', { text: `✓ Found ${matches.length} match(es)` });
+          
+          const matchContainer = resultDiv.createDiv({ cls: 'matches-container' });
+          matches.forEach((match, i) => {
+            matchContainer.createEl('div', { 
+              text: `[${i}]: "${match}"`,
+              cls: 'match-item' 
+            });
+          });
+        } else {
+          resultDiv.createEl('div', { 
+            text: '✗ No matches found',
+            cls: 'test-failure'
+          });
+        }
+      } catch (e) {
+        resultDiv.createEl('div', { 
+          text: `⚠ Error: ${e.message}`,
+          cls: 'test-error'
+        });
+      }
+    };
+    
+    const buttonContainer = contentEl.createDiv({ cls: 'regex-tester-buttons' });
+    const testButton = buttonContainer.createEl('button', { text: 'Test Pattern', cls: 'mod-cta' });
+    testButton.onclick = testPattern;
+    
+    const closeButton = buttonContainer.createEl('button', { text: 'Close', cls: 'mod-warning' });
+    closeButton.onclick = () => this.close();
+    
+    // Test on input changes
+    patternInput.oninput = testPattern;
+    flagsInput.oninput = testPattern;
+    testInput.oninput = testPattern;
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
 
 // Settings Tab
 class ColorTableSettingTab extends PluginSettingTab {
@@ -846,7 +1395,6 @@ class ColorTableSettingTab extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    console.log('Refreshing settings display, current settings:', this.plugin.settings);
 
   new Setting(containerEl).setName("Table Cell Color Settings").setHeading();
 
@@ -913,7 +1461,45 @@ class ColorTableSettingTab extends PluginSettingTab {
 
     // Add new rule input + color pickers + button
     const ruleDiv = containerEl.createDiv({ cls: "rule-input pretty-flex" });
-    const input = ruleDiv.createEl("input", { type: "text", placeholder: "Text to match" });
+    const input = ruleDiv.createEl("input", { type: "text", placeholder: "Text or Pattern to match" });
+    
+    // Regex presets dropdown
+    const regexPresets = [
+      { name: "Email", pattern: "\\b[\\w._%+-]+@[\\w.-]+\\.[A-Z]{2,}\\b" },
+      { name: "URL", pattern: "https?:\\/\\/[^\\s]+" },
+      { name: "Phone", pattern: "\\b\\d{3}[-.]?\\d{3}[-.]?\\d{4}\\b" },
+      { name: "Number", pattern: "\\b\\d+\\b" },
+      { name: "Currency", pattern: "\\$\\d+(?:\\.\\d{2})?" },
+      { name: "Date", pattern: "\\b\\d{1,2}\\/\\d{1,2}\\/\\d{4}\\b" },
+      { name: "IP Address", pattern: "\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b" }
+    ];
+    
+    const presetSelect = ruleDiv.createEl("select", { cls: "regex-preset" });
+    presetSelect.style.width = "120px";
+    presetSelect.createEl("option", { text: "Presets...", value: "" });
+    regexPresets.forEach(preset => {
+      presetSelect.createEl("option", { text: preset.name, value: preset.pattern });
+    });
+    presetSelect.onchange = (e) => {
+      if (e.target.value) {
+        input.value = e.target.value;
+        regexToggle.checked = true;
+        presetSelect.value = "";
+      }
+    };
+    
+    // Regex toggle
+    const regexToggle = ruleDiv.createEl("input", { type: "checkbox", cls: "regex-toggle" });
+    regexToggle.title = "Use regex pattern";
+    regexToggle.style.width = "20px";
+    regexToggle.style.marginLeft = "4px";
+    
+    // Case sensitive toggle
+    const caseToggle = ruleDiv.createEl("input", { type: "checkbox", cls: "case-toggle" });
+    caseToggle.title = "Case sensitive";
+    caseToggle.style.width = "20px";
+    caseToggle.style.marginLeft = "8px";
+    
     // Color pickers beside new rule btn
     const addRuleColorInput = ruleDiv.createEl("input", { type: "color", cls: "add-rule-color-picker" });
     addRuleColorInput.value = this.plugin.settings.defaultTextColor;
@@ -921,6 +1507,7 @@ class ColorTableSettingTab extends PluginSettingTab {
     const addRuleBgInput = ruleDiv.createEl("input", { type: "color", cls: "add-rule-bg-picker" });
     addRuleBgInput.value = this.plugin.settings.defaultBgColor;
     addRuleBgInput.title = "Background Color";
+  
   // Add Rule button
   const addBtn = ruleDiv.createEl('button', { cls: 'add-btn add-rule-btn', attr: { 'aria-label': 'Add Rule' } });
   addBtn.textContent = 'Add Rule';
@@ -929,10 +1516,19 @@ class ColorTableSettingTab extends PluginSettingTab {
       if (!val) return;
       if (!this.plugin.settings) this.plugin.settings = { defaultBgColor: "#331717", defaultTextColor: "#ffb2b2", enableContextMenu: true, rules: [], numericRules: [] };
       if (!Array.isArray(this.plugin.settings.rules)) this.plugin.settings.rules = [];
-      const newRule = { match: val, bg: addRuleBgInput.value, color: addRuleColorInput.value };
+      const newRule = { 
+        match: val, 
+        bg: addRuleBgInput.value, 
+        color: addRuleColorInput.value,
+        regex: regexToggle.checked,
+        caseSensitive: caseToggle.checked
+      };
       this.plugin.settings.rules.push(newRule);
       await this.plugin.saveSettings();
       input.value = "";
+      regexToggle.checked = false;
+      caseToggle.checked = false;
+      presetSelect.value = "";
       this.display();
     };
     if (this.plugin.settings.rules?.length) {
@@ -953,13 +1549,42 @@ class ColorTableSettingTab extends PluginSettingTab {
         } else {
           dragHandle.textContent = '≡';
         }
-        const matchSpan = nameEl.createEl('span', { text: rule.match, cls: 'rule-match' });
+        
+        // Display pattern with regex badge if applicable
+        const patternContainer = nameEl.createDiv({ cls: 'rule-pattern-container' });
+        const matchSpan = patternContainer.createEl('span', { text: rule.match, cls: 'rule-match' });
         matchSpan.style.cursor = 'pointer';
         matchSpan.title = 'Click to edit rule';
+        
+        // Add regex badge if rule uses regex
+        if (rule.regex) {
+          const regexBadge = patternContainer.createEl('span', { text: '.*', cls: 'regex-badge' });
+          regexBadge.title = 'Regex pattern';
+          regexBadge.style.marginLeft = '6px';
+          regexBadge.style.fontSize = '0.75em';
+          regexBadge.style.padding = '2px 4px';
+          regexBadge.style.borderRadius = '3px';
+          regexBadge.style.backgroundColor = 'var(--color-accent, #6366f1)';
+          regexBadge.style.color = 'white';
+          regexBadge.style.display = 'inline-block';
+        }
+        
+        // Add case-sensitive badge if applicable
+        if (rule.caseSensitive) {
+          const caseBadge = patternContainer.createEl('span', { text: 'Aa', cls: 'case-badge' });
+          caseBadge.title = 'Case sensitive';
+          caseBadge.style.marginLeft = '6px';
+          caseBadge.style.fontSize = '0.75em';
+          caseBadge.style.padding = '2px 4px';
+          caseBadge.style.borderRadius = '3px';
+          caseBadge.style.backgroundColor = 'var(--background-modifier-border)';
+          caseBadge.style.display = 'inline-block';
+        }
+        
         const startEditing = async () => {
           const editInput = nameEl.createEl('input', { type: 'text' });
           editInput.value = rule.match;
-          matchSpan.style.display = 'none';
+          patternContainer.style.display = 'none';
           const finish = async (save) => {
             const newVal = editInput.value.trim();
             if (save && newVal) {
@@ -967,8 +1592,7 @@ class ColorTableSettingTab extends PluginSettingTab {
               await this.plugin.saveSettings();
             }
             editInput.remove();
-            matchSpan.textContent = rule.match;
-            matchSpan.style.display = '';
+            patternContainer.style.display = '';
           };
           editInput.addEventListener('blur', () => finish(true));
           editInput.addEventListener('keydown', async (e) => {
@@ -982,6 +1606,33 @@ class ColorTableSettingTab extends PluginSettingTab {
           editInput.select();
         };
         matchSpan.addEventListener('click', startEditing);
+        
+        // Add regex and case-sensitive toggles to control panel
+        const controlsPanel = ruleSetting.controlEl.createDiv({ cls: 'rule-toggles' });
+        controlsPanel.style.marginRight = '12px';
+        
+        const regexCheckbox = controlsPanel.createEl('input', { type: 'checkbox', cls: 'rule-regex-checkbox' });
+        regexCheckbox.checked = rule.regex || false;
+        regexCheckbox.title = 'Use regex pattern';
+        regexCheckbox.style.width = '18px';
+        regexCheckbox.style.cursor = 'pointer';
+        regexCheckbox.onchange = async (e) => {
+          rule.regex = e.target.checked;
+          await this.plugin.saveSettings();
+          this.display();
+        };
+        
+        const caseCheckbox = controlsPanel.createEl('input', { type: 'checkbox', cls: 'rule-case-checkbox' });
+        caseCheckbox.checked = rule.caseSensitive || false;
+        caseCheckbox.title = 'Case sensitive';
+        caseCheckbox.style.width = '18px';
+        caseCheckbox.style.marginLeft = '8px';
+        caseCheckbox.style.cursor = 'pointer';
+        caseCheckbox.onchange = async (e) => {
+          rule.caseSensitive = e.target.checked;
+          await this.plugin.saveSettings();
+          this.display();
+        };
         const rootEl = ruleSetting.settingEl;
         rootEl.dataset.ruleIndex = String(i);
         dragHandle.setAttribute('draggable', 'true');
