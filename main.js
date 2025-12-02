@@ -134,12 +134,12 @@ module.exports = class TableColorPlugin extends Plugin {
       this.registerEvent(this.app.workspace.on('file-open', this.applyColorsToAllEditors));
       this.registerEvent(this.app.workspace.on('layout-change', this.applyColorsToAllEditors));
       // Re-apply on cell focus/blur/input (to persist colors after editing)
-      document.addEventListener('focusin', (e) => {
+      this.registerDomEvent(document, 'focusin', (e) => {
         if (e.target && e.target.closest && e.target.closest('.cm-content table')) {
           this.applyColorsToAllEditors();
         }
       });
-      document.addEventListener('input', (e) => {
+      this.registerDomEvent(document, 'input', (e) => {
         if (e.target && e.target.closest && e.target.closest('.cm-content table')) {
           setTimeout(this.applyColorsToAllEditors, 30);
         }
@@ -149,7 +149,10 @@ module.exports = class TableColorPlugin extends Plugin {
     await this.loadSettings();
     // Setup Live Preview coloring if enabled (after settings loaded)
     setupLivePreviewColoring();
-      // Plugin loaded    const rawSaved = await this.loadData() || {};
+    if (this.settings?.persistUndoHistory) {
+      await this.loadUndoRedoStacks();
+    }
+    const rawSaved = await this.loadData() || {};
 
     this._appliedContainers = new WeakMap();
 
@@ -334,6 +337,16 @@ module.exports = class TableColorPlugin extends Plugin {
               .setIcon('trash-2')
               .onClick(async () => this.resetCell(cell, tableEl))
         );
+        menu.addItem(item =>
+          item.setTitle("Remove Row Coloring")
+              .setIcon('rows-3')
+              .onClick(async () => this.resetRow(cell, tableEl))
+        );
+        menu.addItem(item =>
+          item.setTitle("Remove Column Coloring")
+              .setIcon('columns-3')
+              .onClick(async () => this.resetColumn(cell, tableEl))
+        );
         try {
           if (menu.containerEl && menu.containerEl.classList) menu.containerEl.classList.add('mod-shadow');
           if (menu.menuEl && menu.menuEl.classList) menu.menuEl.classList.add('mod-shadow');
@@ -375,7 +388,15 @@ module.exports = class TableColorPlugin extends Plugin {
       }
     } catch (e) { }
     try {
-      // no global preview observer to disconnect
+      if (this._livePreviewObserver && typeof this._livePreviewObserver.disconnect === 'function') {
+        this._livePreviewObserver.disconnect();
+        this._livePreviewObserver = null;
+      }
+    } catch (e) { }
+    try {
+      if (this.settings?.persistUndoHistory) {
+        this.saveUndoRedoStacks();
+      }
     } catch (e) { }
   }
 
@@ -387,10 +408,21 @@ module.exports = class TableColorPlugin extends Plugin {
 
       enableContextMenu: true,
       rules: [],
+      advancedRules: [],
       numericRules: [], // { op: 'lt'|'gt'|'eq'|'le'|'ge', value: number, color: string, bg: string }
       numericStrict: true, // Only apply numeric rules to pure numbers
-  livePreviewColoring: false, // Table coloring in Live Preview mode
+  livePreviewColoring: false,
+  persistUndoHistory: true,
+  recentColors: [],
+  presetColors: []
     }, data?.settings || {});
+    if (Array.isArray(this.settings.presetColors)) {
+      this.settings.presetColors = this.settings.presetColors.map(pc => {
+        return typeof pc === 'string' ? { name: '', color: pc } : pc;
+      });
+    } else {
+      this.settings.presetColors = [];
+    }
   }
 
   async saveSettings() {
@@ -404,6 +436,15 @@ module.exports = class TableColorPlugin extends Plugin {
       throw error;
     }
     }
+
+  updateRecentColor(color) {
+    if (!color) return;
+    const list = Array.isArray(this.settings.recentColors) ? [...this.settings.recentColors] : [];
+    const existingIndex = list.findIndex(c => c.toUpperCase() === color.toUpperCase());
+    if (existingIndex !== -1) list.splice(existingIndex, 1);
+    list.unshift(color);
+    this.settings.recentColors = list.slice(0, 10);
+  }
 
   // Color Picker Menu Class
   createColorPickerMenu() {
@@ -578,6 +619,76 @@ module.exports = class TableColorPlugin extends Plugin {
           }
         });
         hexRow.appendChild(hexInput);
+        const pickBtn = document.createElement('button');
+        pickBtn.className = 'mod-ghost';
+        pickBtn.textContent = '';
+        Object.assign(pickBtn.style, { width: '36px', height: '32px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' });
+        try {
+          const ob = require('obsidian');
+          if (ob && typeof ob.setIcon === 'function') {
+            ob.setIcon(pickBtn, 'pipette');
+            const svgEl = pickBtn.querySelector('svg');
+            if (svgEl) { svgEl.style.width = '25px'; svgEl.style.height = '25px'; }
+          } else if (typeof window.setIcon === 'function') {
+            window.setIcon(pickBtn, 'pipette');
+            const svgEl = pickBtn.querySelector('svg');
+            if (svgEl) { svgEl.style.width = '25px'; svgEl.style.height = '25px'; }
+          } else if (typeof setIcon === 'function') {
+            setIcon(pickBtn, 'pipette');
+            const svgEl = pickBtn.querySelector('svg');
+            if (svgEl) { svgEl.style.width = '25px'; svgEl.style.height = '25px'; }
+          } else {
+            const svg = document.createElementNS('http://www.w3.org/2000/svg','svg');
+            svg.setAttribute('viewBox','0 0 24 24');
+            svg.setAttribute('width','20');
+            svg.setAttribute('height','20');
+            const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+            path.setAttribute('d','M13.5 6.5l4-4 4 4-4 4M4 20l6-6 3 3-6 6H4v-3z');
+            path.setAttribute('fill','none');
+            path.setAttribute('stroke','currentColor');
+            path.setAttribute('stroke-width','2');
+            path.setAttribute('stroke-linecap','round');
+            path.setAttribute('stroke-linejoin','round');
+            svg.appendChild(path);
+            pickBtn.appendChild(svg);
+          }
+        } catch (e) { }
+        pickBtn.title = 'Pick color from screen';
+        pickBtn.onclick = async () => {
+          try {
+            if ('EyeDropper' in window) {
+              const eye = new window.EyeDropper();
+              const result = await eye.open();
+              const hex = (result && result.sRGBHex) ? result.sRGBHex.toUpperCase() : null;
+              if (hex) {
+                const { h, s, v } = this.hexToHsv(hex);
+                this.hue = h; this.sat = s; this.val = v; this.color = hex;
+                preview.style.background = this.color;
+                drawSB(this.hue);
+                updateSelectors();
+              }
+            } else {
+              pickBtn.title = 'Screen picker not supported in this environment';
+            }
+          } catch (e) { /* ignore user cancel or errors */ }
+        };
+        hexRow.appendChild(pickBtn);
+        const recentRow = document.createElement('div');
+        Object.assign(recentRow.style, { display: 'flex', flexWrap: 'wrap', gap: '6px', width: '100%', marginTop: '6px' });
+        const recents = Array.isArray(this.plugin.settings.recentColors) ? this.plugin.settings.recentColors : [];
+        recents.slice(0, 10).forEach(rc => {
+          const sw = document.createElement('button');
+          Object.assign(sw.style, { width: '22px', height: '22px', borderRadius: '4px', border: '1px solid var(--background-modifier-border, #333)', background: rc, cursor: 'pointer', padding: '0' });
+          sw.addEventListener('click', () => {
+            const { h, s, v } = this.hexToHsv(rc);
+            this.hue = h; this.sat = s; this.val = v; this.color = rc;
+            preview.style.background = this.color;
+            drawSB(this.hue);
+            updateSelectors();
+          });
+          recentRow.appendChild(sw);
+        });
+        this.menuEl.appendChild(recentRow);
         const updateSelectors = () => {
           const x = Math.round(this.sat * (sbBox.width-1));
           const y = Math.round((1-this.val) * (sbBox.height-1));
@@ -799,6 +910,7 @@ module.exports = class TableColorPlugin extends Plugin {
         newColors
       );
       this.addToUndoStack(snapshot);
+      this.updateRecentColor(pickedColor);
       
       await this.saveDataColors();
     }, initialColor, cell);
@@ -853,6 +965,7 @@ module.exports = class TableColorPlugin extends Plugin {
         newColors
       );
       this.addToUndoStack(snapshot);
+      this.updateRecentColor(pickedColor);
       
       await this.saveDataColors();
     }, initialColor, cell);
@@ -927,6 +1040,7 @@ module.exports = class TableColorPlugin extends Plugin {
         newColors
       );
       this.addToUndoStack(snapshot);
+      this.updateRecentColor(pickedColor);
       
       await this.saveDataColors();
     }, initialColor, cell);
@@ -954,6 +1068,65 @@ module.exports = class TableColorPlugin extends Plugin {
       delete noteData[tableKey][`row_${rowIndex}`][`col_${colIndex}`];
       await this.saveDataColors();
     }
+  }
+
+  async resetRow(cell, tableEl) {
+    const fileId = this.app.workspace.getActiveFile()?.path;
+    if (!fileId) return;
+
+    const allTables = Array.from(tableEl.closest('.markdown-preview-section, .markdown-preview-view')?.querySelectorAll('table') || tableEl.ownerDocument.querySelectorAll('table'));
+    const tableIndex = allTables.indexOf(tableEl);
+    const rowIndex = Array.from(tableEl.querySelectorAll('tr')).indexOf(cell.closest('tr'));
+
+    const noteData = this.cellData[fileId] || {};
+    const tableKey = `table_${tableIndex}`;
+    const tableColors = noteData[tableKey] || {};
+    const rowKey = `row_${rowIndex}`;
+    const oldColors = tableColors[rowKey] ? { ...tableColors[rowKey] } : undefined;
+
+    if (!this.cellData[fileId]) this.cellData[fileId] = {};
+    if (!this.cellData[fileId][tableKey]) this.cellData[fileId][tableKey] = {};
+    delete this.cellData[fileId][tableKey][rowKey];
+
+    cell.closest('tr')?.querySelectorAll('td, th')?.forEach(td => { td.style.backgroundColor = ""; td.style.color = ""; });
+
+    const snapshot = this.createSnapshot('row_color', fileId, tableIndex, { row: rowIndex }, oldColors, undefined);
+    this.addToUndoStack(snapshot);
+
+    await this.saveDataColors();
+  }
+
+  async resetColumn(cell, tableEl) {
+    const fileId = this.app.workspace.getActiveFile()?.path;
+    if (!fileId) return;
+
+    const allTables = Array.from(tableEl.closest('.markdown-preview-section, .markdown-preview-view')?.querySelectorAll('table') || tableEl.ownerDocument.querySelectorAll('table'));
+    const tableIndex = allTables.indexOf(tableEl);
+    const colIndex = Array.from(cell.closest('tr').querySelectorAll('td, th')).indexOf(cell);
+
+    if (!this.cellData[fileId]) this.cellData[fileId] = {};
+    const noteData = this.cellData[fileId];
+    const tableKey = `table_${tableIndex}`;
+    if (!noteData[tableKey]) noteData[tableKey] = {};
+    const tableColors = noteData[tableKey];
+
+    const oldColors = {};
+    Object.entries(tableColors).forEach(([rk, rowData]) => {
+      if (rk.startsWith('row_') && rowData[`col_${colIndex}`]) {
+        oldColors[rk] = { [`col_${colIndex}`]: { ...rowData[`col_${colIndex}`] } };
+        delete rowData[`col_${colIndex}`];
+      }
+    });
+
+    tableEl.querySelectorAll('tr').forEach(tr => {
+      const cells = tr.querySelectorAll('td, th');
+      if (colIndex < cells.length) { const c = cells[colIndex]; c.style.backgroundColor = ""; c.style.color = ""; }
+    });
+
+    const snapshot = this.createSnapshot('column_color', fileId, tableIndex, { col: colIndex }, oldColors, undefined);
+    this.addToUndoStack(snapshot);
+
+    await this.saveDataColors();
   }
 
   async loadDataSettings() {
@@ -997,6 +1170,9 @@ module.exports = class TableColorPlugin extends Plugin {
     // Limit stack size
     if (this.undoStack.length > this.maxStackSize) {
       this.undoStack.shift();
+    }
+    if (this.settings?.persistUndoHistory) {
+      this.saveUndoRedoStacks();
     }
   }
 
@@ -1052,6 +1228,9 @@ module.exports = class TableColorPlugin extends Plugin {
     }
     
     await this.saveDataColors();
+    if (this.settings?.persistUndoHistory) {
+      this.saveUndoRedoStacks();
+    }
   }
 
   // Redo last undone operation
@@ -1106,6 +1285,98 @@ module.exports = class TableColorPlugin extends Plugin {
     }
     
     await this.saveDataColors();
+    if (this.settings?.persistUndoHistory) {
+      this.saveUndoRedoStacks();
+    }
+  }
+
+  evaluateAdvancedRule(rule, cellText) {
+    if (!rule || !Array.isArray(rule.conditions)) return false;
+    const logic = (rule.logic || 'AND').toUpperCase();
+    const text = (cellText || '').trim();
+    const numCandidate = parseFloat(text.replace(/,/g, ''));
+    const numericVal = isNaN(numCandidate) ? null : numCandidate;
+    const dateCandidate = Date.parse(text);
+    const dateVal = isNaN(dateCandidate) ? null : new Date(dateCandidate).getTime();
+    const evalCond = (cond) => {
+      const type = (cond.type || 'text').toLowerCase();
+      const op = (cond.operator || cond.op || 'contains').toLowerCase();
+      if (type === 'empty') {
+        return text.length === 0;
+      }
+      if (type === 'text') {
+        const cs = !!cond.caseSensitive;
+        const m = String(cond.value != null ? cond.value : cond.match || '');
+        const th = cs ? text : text.toLowerCase();
+        const mh = cs ? m : m.toLowerCase();
+        if (op === 'contains') return th.includes(mh);
+        if (op === 'equals') return th === mh;
+        if (op === 'startswith') return th.startsWith(mh);
+        if (op === 'endswith') return th.endsWith(mh);
+        return false;
+      }
+      if (type === 'regex') {
+        try {
+          const flags = cond.flags || (cond.caseSensitive ? 'g' : 'gi');
+          const re = new RegExp(String(cond.value != null ? cond.value : cond.match || ''), flags);
+          return re.test(text);
+        } catch (e) { return false; }
+      }
+      if (type === 'numeric') {
+        if (numericVal === null) return false;
+        const v = Number(cond.value);
+        if (op === 'between') {
+          const v2 = Number(cond.value2);
+          if (isNaN(v) || isNaN(v2)) return false;
+          const min = Math.min(v, v2), max = Math.max(v, v2);
+          return numericVal >= min && numericVal <= max;
+        }
+        if (op === 'lt') return numericVal < v;
+        if (op === 'le') return numericVal <= v;
+        if (op === 'eq') return numericVal === v;
+        if (op === 'ge') return numericVal >= v;
+        if (op === 'gt') return numericVal > v;
+        return false;
+      }
+      if (type === 'date') {
+        if (dateVal === null) return false;
+        const vStr = String(cond.value || '');
+        const v2Str = String(cond.value2 || '');
+        const v = Date.parse(vStr);
+        const v2 = Date.parse(v2Str);
+        if (op === 'between') {
+          if (isNaN(v) || isNaN(v2)) return false;
+          const min = Math.min(v, v2), max = Math.max(v, v2);
+          return dateVal >= min && dateVal <= max;
+        }
+        if (op === 'before') return !isNaN(v) && dateVal < v;
+        if (op === 'after') return !isNaN(v) && dateVal > v;
+        return false;
+      }
+      return false;
+    };
+    if (logic === 'AND') {
+      for (const c of rule.conditions) { if (!evalCond(c)) return false; }
+      return true;
+    }
+    for (const c of rule.conditions) { if (evalCond(c)) return true; }
+    return false;
+  }
+
+  async saveUndoRedoStacks() {
+    try {
+      localStorage.setItem('table-color-undo-stack', JSON.stringify(this.undoStack));
+      localStorage.setItem('table-color-redo-stack', JSON.stringify(this.redoStack));
+    } catch (e) {}
+  }
+
+  async loadUndoRedoStacks() {
+    try {
+      const u = localStorage.getItem('table-color-undo-stack');
+      const r = localStorage.getItem('table-color-redo-stack');
+      if (u) this.undoStack = JSON.parse(u) || [];
+      if (r) this.redoStack = JSON.parse(r) || [];
+    } catch (e) {}
   }
 
   // Apply rule and saved colors to a DOM container
@@ -1201,7 +1472,7 @@ module.exports = class TableColorPlugin extends Plugin {
             cell.style.color = "";
           }
           
-          // Apply rule-based coloring first
+          
           this.settings.rules.forEach(rule => {
             let matches = false;
             try {
@@ -1253,6 +1524,14 @@ module.exports = class TableColorPlugin extends Plugin {
                   if (nRule.color) cell.style.color = nRule.color;
                   break;
                 }
+              }
+            }
+          }
+          if (Array.isArray(this.settings.advancedRules) && this.settings.advancedRules.length) {
+            for (const aRule of this.settings.advancedRules) {
+              if (this.evaluateAdvancedRule(aRule, cellText)) {
+                if (aRule.bg) cell.style.backgroundColor = aRule.bg;
+                if (aRule.color) cell.style.color = aRule.color;
               }
             }
           }
@@ -1383,6 +1662,135 @@ class RegexTesterModal extends Modal {
   }
 }
 
+class ConditionRow {
+  constructor(parent, index, initialData, onChange) {
+    this.root = parent.createDiv({ cls: 'num-edit-row pretty-flex' });
+    Object.assign(this.root.style, { display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 8px', borderRadius: '6px', background: 'var(--background-secondary, #232323)' });
+    this.typeSel = this.root.createEl('select');
+    ['text','numeric','date','regex','empty'].forEach(t => { const o = this.typeSel.createEl('option'); o.value = t; o.text = t; });
+    this.opSel = this.root.createEl('select');
+    this.valInput = this.root.createEl('input', { type: 'text' });
+    Object.assign(this.valInput.style, { flex: '1', padding: '6px 8px' });
+    this.val2Input = this.root.createEl('input', { type: 'text' });
+    this.val2Input.style.display = 'none';
+    Object.assign(this.val2Input.style, { flex: '1', padding: '6px 8px' });
+    this.caseChk = this.root.createEl('input', { type: 'checkbox' });
+    this.logicSel = this.root.createEl('select');
+    ;['AND','OR'].forEach(t => { const o = this.logicSel.createEl('option'); o.value = t; o.text = t; });
+    const delBtn = this.root.createEl('button', { cls: 'mod-ghost' });
+    delBtn.textContent = 'Delete';
+    const setOps = () => {
+      const t = this.typeSel.value;
+      this.opSel.empty();
+      if (t === 'text') ['contains','equals','startsWith','endsWith'].forEach(op => { const o = this.opSel.createEl('option'); o.value = op; o.text = op; });
+      else if (t === 'numeric') ['gt','ge','eq','le','lt','between'].forEach(op => { const o = this.opSel.createEl('option'); o.value = op; o.text = op; });
+      else if (t === 'date') ['before','after','between'].forEach(op => { const o = this.opSel.createEl('option'); o.value = op; o.text = op; });
+      else if (t === 'regex') ['matches'].forEach(op => { const o = this.opSel.createEl('option'); o.value = op; o.text = op; });
+      else { this.opSel.createEl('option', { text: 'isEmpty', attr: { value: 'isEmpty' } }); }
+      const op = this.opSel.value;
+      const useTwo = op === 'between';
+      this.val2Input.style.display = useTwo ? '' : 'none';
+      if (t === 'numeric') { this.valInput.type = 'number'; this.val2Input.type = 'number'; }
+      else if (t === 'date') { this.valInput.type = 'date'; this.val2Input.type = 'date'; }
+      else { this.valInput.type = 'text'; this.val2Input.type = 'text'; }
+      this.caseChk.style.display = (t === 'text' || t === 'regex') ? '' : 'none';
+      if (typeof onChange === 'function') onChange();
+    };
+    this.typeSel.onchange = setOps;
+    this.opSel.onchange = setOps;
+    delBtn.onclick = () => { this.root.remove(); if (typeof onChange === 'function') onChange(); };
+    if (initialData) {
+      this.typeSel.value = initialData.type || 'text';
+      setOps();
+      if (initialData.operator) this.opSel.value = initialData.operator;
+      if (initialData.value != null) this.valInput.value = initialData.value;
+      if (initialData.value2 != null) { this.val2Input.value = initialData.value2; this.val2Input.style.display = ''; }
+      this.caseChk.checked = !!initialData.caseSensitive;
+      if (initialData.logic) this.logicSel.value = initialData.logic.toUpperCase();
+    } else { setOps(); }
+  }
+  getData() {
+    const t = this.typeSel.value;
+    const op = this.opSel.value;
+    const v = t === 'numeric' ? (this.valInput.value !== '' ? Number(this.valInput.value) : null) : this.valInput.value;
+    const v2 = t === 'numeric' || t === 'date' ? (this.val2Input.style.display === '' ? (this.val2Input.value !== '' ? (t === 'numeric' ? Number(this.val2Input.value) : this.val2Input.value) : null) : null) : null;
+    return { type: t, operator: op, value: v, value2: v2, caseSensitive: this.caseChk.checked, logic: this.logicSel.value };
+  }
+}
+
+class AdvancedRuleModal extends Modal {
+  constructor(app, plugin, initialRule) {
+    super(app);
+    this.plugin = plugin;
+    this.initialRule = initialRule || null;
+    this.onSave = null;
+    this.rows = [];
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    Object.assign(contentEl.style, { padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px', minWidth: '520px' });
+    const title = contentEl.createEl('h3', { text: 'Advanced Rule Builder' });
+    const headerRow = contentEl.createDiv({ cls: 'pretty-flex' });
+    Object.assign(headerRow.style, { display: 'flex', alignItems: 'center', gap: '8px' });
+    const nameInput = headerRow.createEl('input', { type: 'text', attr: { placeholder: 'Rule name' } });
+    Object.assign(nameInput.style, { flex: '1', padding: '6px 8px' });
+    const logicSel = headerRow.createEl('select');
+    ['AND','OR'].forEach(x => { const o = logicSel.createEl('option'); o.value = x; o.text = x; });
+    const scopeSel = headerRow.createEl('select');
+    ['cell','row','column'].forEach(x => { const o = scopeSel.createEl('option'); o.value = x; o.text = x; });
+    const colorsRow = contentEl.createDiv({ cls: 'pretty-flex' });
+    Object.assign(colorsRow.style, { display: 'flex', alignItems: 'center', gap: '10px' });
+    const bgLabel = colorsRow.createEl('span', { text: 'Background:' });
+    const bgPick = colorsRow.createEl('input', { type: 'color' });
+    const colorLabel = colorsRow.createEl('span', { text: 'Text:' });
+    const colorPick = colorsRow.createEl('input', { type: 'color' });
+    colorPick.value = this.plugin.settings.defaultTextColor;
+    bgPick.value = this.plugin.settings.defaultBgColor;
+    const rowsContainer = contentEl.createDiv({ cls: 'rules-list' });
+    Object.assign(rowsContainer.style, { display: 'flex', flexDirection: 'column', gap: '8px' });
+    const actionsRow = contentEl.createDiv({ cls: 'pretty-flex' });
+    Object.assign(actionsRow.style, { display: 'flex', alignItems: 'center', gap: '8px' });
+    const addBtn = actionsRow.createEl('button', { cls: 'mod-cta' });
+    addBtn.textContent = 'Add Condition';
+    const addRow = (data) => {
+      const row = new ConditionRow(rowsContainer, this.rows.length, data, () => {});
+      this.rows.push(row);
+      this.rows.forEach((r, i) => { r.logicSel.style.display = i === this.rows.length - 1 ? 'none' : ''; });
+    };
+    addBtn.onclick = () => addRow();
+    const testBtn = actionsRow.createEl('button', { cls: 'mod-ghost' });
+    testBtn.textContent = 'Test';
+    testBtn.onclick = () => {
+      const rule = collect();
+      const activeView = this.plugin.app.workspace.getActiveViewOfType(require('obsidian').MarkdownView);
+      const filePath = this.plugin.app.workspace.getActiveFile()?.path;
+      if (!activeView || !filePath) return;
+      const previewEl = activeView.contentEl.querySelector('.markdown-preview-view');
+      if (!previewEl) return;
+      previewEl.querySelectorAll('td, th').forEach(c => { c.style.outline = ''; });
+      previewEl.querySelectorAll('td, th').forEach(c => { const txt = this.plugin.getCellText(c); if (this.plugin.evaluateAdvancedRule(rule, txt)) { c.style.outline = '2px solid var(--interactive-accent)'; } });
+      setTimeout(() => { previewEl.querySelectorAll('td, th').forEach(c => { c.style.outline = ''; }); }, 2000);
+    };
+    const saveBtn = actionsRow.createEl('button', { cls: 'mod-cta' });
+    saveBtn.textContent = 'Save Rule';
+    const collect = () => {
+      return { name: nameInput.value || '', conditions: this.rows.map(r => r.getData()), logic: logicSel.value, bg: bgPick.value, color: colorPick.value, scope: scopeSel.value };
+    };
+    saveBtn.onclick = () => { const rule = collect(); if (typeof this.onSave === 'function') this.onSave(rule); this.close(); };
+    if (this.initialRule && Array.isArray(this.initialRule.conditions)) {
+      nameInput.value = this.initialRule.name || '';
+      logicSel.value = (this.initialRule.logic || 'AND').toUpperCase();
+      bgPick.value = this.initialRule.bg || bgPick.value;
+      colorPick.value = this.initialRule.color || colorPick.value;
+      scopeSel.value = this.initialRule.scope || 'cell';
+      this.initialRule.conditions.forEach(c => addRow({ type: c.type || 'text', operator: c.operator || c.op, value: c.value, value2: c.value2, caseSensitive: c.caseSensitive, logic: c.logic }));
+      this.rows.forEach((r, i) => { r.logicSel.style.display = i === this.rows.length - 1 ? 'none' : ''; });
+    } else { addRow(); }
+  }
+  onClose() { this.contentEl.empty(); }
+}
+
 // Settings Tab
 class ColorTableSettingTab extends PluginSettingTab {
 
@@ -1456,8 +1864,11 @@ class ColorTableSettingTab extends PluginSettingTab {
                 await this.plugin.saveSettings();
               }));
 
+    
+
   // Rule-based coloring
   new Setting(containerEl).setName("Rule-based Cell Coloring").setHeading();
+    new Setting(containerEl).setDesc("Match text or regex to color cells");
 
     // Add new rule input + color pickers + button
     const ruleDiv = containerEl.createDiv({ cls: "rule-input pretty-flex" });
@@ -1680,6 +2091,7 @@ class ColorTableSettingTab extends PluginSettingTab {
 
   // --- Numerical Rules Section ---
   new Setting(containerEl).setName("Numerical Rules").setHeading();
+  new Setting(containerEl).setDesc("Apply colors based on numeric thresholds");
   const numRuleDiv = containerEl.createDiv({ cls: "num-rule-input pretty-flex num-rule-row" });
     // Operator select
     const opSelect = numRuleDiv.createEl("select", { cls: "num-op-select" });
@@ -1812,10 +2224,69 @@ class ColorTableSettingTab extends PluginSettingTab {
       });
     }
 
-if (!document.head.querySelector('style[data-color-table-cell-numeric]')) {
-  style.setAttribute('data-color-table-cell-numeric', '');
-  document.head.appendChild(style);
-}
+    new Setting(containerEl).setName("Advanced Rules (AND/OR)").setHeading();
+    new Setting(containerEl).setDesc("Combine multiple conditions to apply colors");
+    const advActions = containerEl.createDiv({ cls: 'pretty-flex' });
+    const addAdvBtn = advActions.createEl('button', { cls: 'mod-cta' });
+    addAdvBtn.textContent = 'Add Advanced Rule';
+    addAdvBtn.onclick = () => {
+      const modal = new AdvancedRuleModal(this.app, this.plugin, null);
+      modal.onSave = async (rule) => {
+        if (!Array.isArray(this.plugin.settings.advancedRules)) this.plugin.settings.advancedRules = [];
+        this.plugin.settings.advancedRules.push(rule);
+        await this.plugin.saveSettings();
+        this.display();
+      };
+      modal.open();
+    };
+    if (Array.isArray(this.plugin.settings.advancedRules) && this.plugin.settings.advancedRules.length) {
+      const advList = containerEl.createDiv({ cls: 'rules-list' });
+      this.plugin.settings.advancedRules.forEach((ar, i) => {
+        const s = new Setting(advList);
+        const nameEl = s.nameEl;
+        nameEl.empty();
+        const logic = (ar.logic || 'AND').toUpperCase();
+        const summary = Array.isArray(ar.conditions) ? ar.conditions.map(c => {
+          const t = (c.type||'text');
+          const op = c.operator || c.op || '';
+          if (t === 'numeric') return `${op} ${c.value}${op==='between'&&c.value2!=null?`–${c.value2}`:''}`;
+          if (t === 'date') return `${op} ${c.value}${op==='between'&&c.value2?`–${c.value2}`:''}`;
+          if (t === 'regex') return `/${c.match||c.value||''}/`;
+          if (t === 'empty') return `empty`;
+          return `${op || 'contains'} ${c.match || c.value || ''}`;
+        }).join(` ${logic} `) : '';
+        nameEl.createEl('span', { text: summary });
+        s.addColorPicker(p => p.setValue(ar.color || '').onChange(async val => { ar.color = val; await this.plugin.saveDataSettings(); }))
+         .addColorPicker(p => p.setValue(ar.bg || '').onChange(async val => { ar.bg = val; await this.plugin.saveDataSettings(); }));
+        const controls = s.controlEl.createDiv({ cls: 'rule-controls' });
+        const editButton = new ButtonComponent(controls);
+        editButton.setIcon('pencil');
+        editButton.setTooltip('Edit rule');
+        editButton.onClick(() => {
+          const modal = new AdvancedRuleModal(this.app, this.plugin, ar);
+          modal.onSave = async (rule) => { this.plugin.settings.advancedRules[i] = rule; await this.plugin.saveSettings(); this.display(); };
+          modal.open();
+        });
+        const dupButton = new ButtonComponent(controls);
+        dupButton.setIcon('copy');
+        dupButton.setTooltip('Duplicate rule');
+        dupButton.onClick(async () => {
+          const copy = JSON.parse(JSON.stringify(ar));
+          this.plugin.settings.advancedRules.splice(i+1, 0, copy);
+          await this.plugin.saveSettings();
+          this.display();
+        });
+        const delButton = new ButtonComponent(controls);
+        delButton.setIcon('trash-2');
+        delButton.setTooltip('Delete rule');
+        delButton.buttonEl.classList.add('rule-delete-btn');
+        delButton.onClick(async () => {
+          this.plugin.settings.advancedRules.splice(i, 1);
+          await this.plugin.saveSettings();
+          this.display();
+        });
+      });
+    }
   }
 }
 

@@ -2,7 +2,7 @@
   "id": "color-table-cell",
   "name": "Color Table Cell",
   "description": "Color table cells via right-click in Reading mode. Colors are viewable in both Reading and Live Preview modes.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "minAppVersion": "1.4.0",
   "author": "Kazi Aidah Haque",
   "authorUrl": "https://github.com/Kazi-Aidah",
