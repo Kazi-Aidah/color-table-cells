@@ -1,7 +1,7 @@
 {
   "id": "color-table-cell",
   "name": "Color Table Cell",
-  "description": "Color table cells via right-click in Reading mode. Colors are viewable in both Reading and Live Preview modes.",
+  "description": "Color your table cells through rules or simple right-click actions.",
   "version": "0.2.0",
   "minAppVersion": "1.4.0",
   "author": "Kazi Aidah Haque",
