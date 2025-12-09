@@ -1,10 +1,9 @@
 const { Plugin, PluginSettingTab, Setting, Menu, ButtonComponent, Modal } = require('obsidian');
 
 // Debug configuration
-const debugMode = false;
-
-// Debug logging helper - removed to follow guidelines
-const debugLog = () => {};
+const IS_DEVELOPMENT = true;
+const debugLog = (...args) => IS_DEVELOPMENT && console.log('[CTC-DEBUG]', ...args);
+const debugWarn = (...args) => IS_DEVELOPMENT && console.warn('[CTC-WARN]', ...args);
 
 module.exports = class TableColorPlugin extends Plugin {
   // Undo/redo stacks
@@ -49,28 +48,12 @@ module.exports = class TableColorPlugin extends Plugin {
     this.addCommand({
       id: 'undo-color-change',
       name: 'Undo Last Color Change',
-      hotkeys: [
-        {
-          modifiers: ["Ctrl"],
-          key: "z"
-        }
-      ],
       callback: () => this.undo()
     });
 
     this.addCommand({
       id: 'redo-color-change',
       name: 'Redo Last Color Change',
-      hotkeys: [
-        {
-          modifiers: ["Ctrl"],
-          key: "y"
-        },
-        {
-          modifiers: ["Ctrl", "Shift"],
-          key: "z"
-        }
-      ],
       callback: () => this.redo()
     });
 
@@ -89,6 +72,52 @@ module.exports = class TableColorPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: 'manage-coloring-rules',
+      name: 'Manage Coloring Rules',
+      callback: () => {
+        this.app.setting.open();
+        setTimeout(() => {
+          if (this.app.setting && typeof this.app.setting.openTabById === 'function') {
+            this.app.setting.openTabById('color-table-cell');
+          }
+        }, 250);
+      }
+    });
+
+    this.addCommand({
+      id: 'add-advanced-rule',
+      name: 'Add Advanced Rule',
+      callback: async () => {
+        if (!Array.isArray(this.settings.advancedRules)) this.settings.advancedRules = [];
+        this.settings.advancedRules.push({ logic:'any', conditions:[], target:'cell', color:null, bg:null });
+        await this.saveSettings();
+        const idx = this.settings.advancedRules.length - 1;
+        new AdvancedRuleModal(this.app, this, idx).open();
+        document.dispatchEvent(new CustomEvent('ctc-adv-rules-changed'));
+      }
+    });
+
+    this.addCommand({
+      id: 'manage-advanced-rules',
+      name: 'Manage Advanced Rules',
+      callback: () => {
+        this.app.setting.open();
+        setTimeout(() => {
+          if (this.app.setting && typeof this.app.setting.openTabById === 'function') {
+            this.app.setting.openTabById('color-table-cell');
+            // Scroll to advanced rules section
+            setTimeout(() => {
+              const advHeading = document.querySelector('.cr-adv-heading');
+              if (advHeading) {
+                advHeading.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              }
+            }, 200);
+          }
+        }, 250);
+      }
+    });
+
+    this.addCommand({
       id: 'open-regex-tester',
       name: 'Open Regex Pattern Tester',
       callback: () => {
@@ -98,6 +127,7 @@ module.exports = class TableColorPlugin extends Plugin {
 
     // --- Live Preview Table Coloring logic ---
     this.applyColorsToAllEditors = () => {
+      debugLog('applyColorsToAllEditors called, livePreviewColoring:', this.settings.livePreviewColoring);
       if (!this.settings.livePreviewColoring) {
         // Remove all colors if disabled
         document.querySelectorAll('.cm-content table').forEach(table => {
@@ -108,15 +138,105 @@ module.exports = class TableColorPlugin extends Plugin {
         });
         return;
       }
-      document.querySelectorAll('.cm-content').forEach(editorEl => {
+      const editors = document.querySelectorAll('.cm-content');
+      debugLog(`Found ${editors.length} editors`);
+      
+      editors.forEach(editorEl => {
         if (editorEl.querySelector('table')) {
           const file = this.app.workspace.getActiveFile();
           if (file) {
+            debugLog(`Applying colors to editor for file: ${file.path}`);
             this.applyColorsToContainer(editorEl, file.path);
           }
         }
       });
+      
+      // Also apply to all .cm-content tables directly for manual cell colors
+      const allTables = document.querySelectorAll('.cm-content table');
+      debugLog(`Found ${allTables.length} tables total in live preview`);
+      
+      allTables.forEach((tableEl, tableIdx) => {
+        const file = this.app.workspace.getActiveFile();
+        if (file) {
+          const noteData = this.cellData[file.path] || {};
+          
+          // Try to get the correct table index
+          let tableIndex = tableEl.getAttribute('data-ctc-index');
+          if (tableIndex === null) {
+            // If no saved index, calculate it
+            const containerTables = Array.from(tableEl.closest('.cm-content')?.querySelectorAll('table') || []);
+            tableIndex = containerTables.indexOf(tableEl);
+          } else {
+            tableIndex = parseInt(tableIndex);
+          }
+          
+          const tableKey = `table_${tableIndex}`;
+          const tableColors = noteData[tableKey] || {};
+          
+          debugLog(`Table ${tableIdx}: key=${tableKey}, index=${tableIndex}, has colors:`, Object.keys(tableColors).length > 0);
+          
+          let coloredCells = 0;
+          Array.from(tableEl.querySelectorAll('tr')).forEach((tr, rIdx) => {
+            const rowKey = `row_${rIdx}`;
+            const rowColors = tableColors[rowKey] || {};
+            const cells = Array.from(tr.querySelectorAll('td, th'));
+            cells.forEach((cell, cIdx) => {
+              const colorData = rowColors[`col_${cIdx}`];
+              if (colorData) {
+                coloredCells++;
+                if (colorData.bg) {
+                  cell.style.backgroundColor = colorData.bg;
+                  cell.setAttribute('data-ctc-bg', colorData.bg);
+                }
+                if (colorData.color) {
+                  cell.style.color = colorData.color;
+                  cell.setAttribute('data-ctc-color', colorData.color);
+                }
+              }
+            });
+          });
+          debugLog(`Table ${tableIdx}: colored ${coloredCells} cells`);
+        }
+      });
     };
+
+    // Observe editors to force coloring on large tables as they render
+    const installEditorObservers = () => {
+      const editors = Array.from(document.querySelectorAll('.cm-content'));
+      editors.forEach(ed => {
+        if (ed._ctcObserver) return;
+        const obs = new MutationObserver(() => {
+          const file = this.app.workspace.getActiveFile();
+          if (file && this.settings.livePreviewColoring) {
+            this.applyColorsToContainer(ed, file.path);
+          }
+        });
+        obs.observe(ed, { childList: true, subtree: true });
+        ed._ctcObserver = obs;
+        
+        // Add scroll handler to restore colors from data attributes
+        if (!ed._ctcScrollListener) {
+          let scrollTimeout;
+          const onScroll = () => {
+            clearTimeout(scrollTimeout);
+            scrollTimeout = setTimeout(() => {
+              // Restore colors from data attributes to handle DOM recreation
+              ed.querySelectorAll('[data-ctc-bg], [data-ctc-color]').forEach(cell => {
+                if (cell.hasAttribute('data-ctc-bg')) {
+                  cell.style.backgroundColor = cell.getAttribute('data-ctc-bg');
+                }
+                if (cell.hasAttribute('data-ctc-color')) {
+                  cell.style.color = cell.getAttribute('data-ctc-color');
+                }
+              });
+            }, 50);
+          };
+          ed.addEventListener('scroll', onScroll);
+          ed._ctcScrollListener = true;
+        }
+      });
+    };
+    installEditorObservers();
 
     const setupLivePreviewColoring = () => {
       // Initial application
@@ -155,6 +275,34 @@ module.exports = class TableColorPlugin extends Plugin {
     const rawSaved = await this.loadData() || {};
 
     this._appliedContainers = new WeakMap();
+    
+    // Register event to refresh colors when switching files
+    this.registerEvent(this.app.workspace.on('file-open', async (file) => {
+      setTimeout(() => {
+        // Clear any cached containers from previous file
+        if (this._appliedContainers && typeof this._appliedContainers.forEach === 'function') {
+          this._appliedContainers.forEach((_, container) => {
+            if (!container.isConnected) {
+              this._appliedContainers.delete(container);
+            }
+          });
+        }
+        
+        // Reapply colors to new file
+        if (typeof this.applyColorsToActiveFile === 'function') {
+          this.applyColorsToActiveFile();
+        }
+      }, 50);
+    }));
+    
+    // Reapply colors when layout changes (mode switches)
+    this.registerEvent(this.app.workspace.on('layout-change', async () => {
+      setTimeout(() => {
+        if (typeof this.applyColorsToActiveFile === 'function') {
+          this.applyColorsToActiveFile();
+        }
+      }, 100);
+    }));
 
     const normalizeCellData = (obj) => {
       let cur = obj;
@@ -208,12 +356,46 @@ module.exports = class TableColorPlugin extends Plugin {
       try { this.addSettingTab(this._settingsTab); } catch (e) { /* ignore if already added */ }
     }
 
+    // Auto-refresh active document when settings are closed
+    this.registerDomEvent(document, 'click', (e) => {
+      const settingsContainer = document.querySelector('.vertical-tabs-container, .settings');
+      const isClosingSettings = !settingsContainer || !settingsContainer.offsetParent;
+      if (isClosingSettings && this._settingsWasOpen) {
+        this._settingsWasOpen = false;
+        setTimeout(() => {
+          if (typeof this.applyColorsToActiveFile === 'function') {
+            this.applyColorsToActiveFile();
+          }
+        }, 100);
+      }
+    });
+    
+    // Track when settings are opened
+    const originalOpen = this.app.setting?.open?.bind(this.app.setting) || (() => {});
+    if (this.app.setting) {
+      this.app.setting.open = () => {
+        this._settingsWasOpen = true;
+        return originalOpen();
+      };
+    }
+
+    // Track observers for cleanup
+    this._containerObservers = new Map();
+    
     this.registerMarkdownPostProcessor((el, ctx) => {
       if (!el.closest('.markdown-preview-view')) return;
       const fileId = ctx.sourcePath;
       this.applyColorsToContainer(el, fileId);
 
       try {
+        // Skip if we're already observing this element
+        if (this._containerObservers.has(el)) {
+          const existing = this._containerObservers.get(el);
+          if (existing && existing.observer) {
+            return; // Already observing this element
+          }
+        }
+        
         let observer = null;
         let debounceId = null;
         let scrollListener = null;
@@ -224,44 +406,178 @@ module.exports = class TableColorPlugin extends Plugin {
           try { if (debounceId) { clearTimeout(debounceId); debounceId = null; } } catch (e) { }
           try { if (scrollListener && el.parentElement) { el.parentElement.removeEventListener('scroll', scrollListener); } } catch (e) { }
           try { if (scrollDebounceId) { clearTimeout(scrollDebounceId); scrollDebounceId = null; } } catch (e) { }
+          
+          // Remove from tracking map
+          if (this._containerObservers.has(el)) {
+            this._containerObservers.delete(el);
+          }
         };
 
         const checkAndApply = () => {
           try {
+            // Check if element is still connected to DOM
+            if (!el.isConnected) {
+              safeDisconnect();
+              return;
+            }
+            
             if (el.querySelectorAll && el.querySelectorAll('table').length > 0) {
               this.applyColorsToContainer(el, fileId);
-              safeDisconnect();
+              // Don't disconnect immediately - keep observing for dynamic content
             }
           } catch (e) { /* ignore */ }
         };
 
         observer = new MutationObserver((mutations) => {
-          if (debounceId) clearTimeout(debounceId);
-          debounceId = setTimeout(() => {
-            checkAndApply();
-          }, 80);
+          // Look specifically for added tables
+          let hasTableAdded = false;
+          mutations.forEach(mutation => {
+            if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+              mutation.addedNodes.forEach(node => {
+                if (node.nodeType === 1) { // Element node
+                  // Check if this is a table or contains tables
+                  if (node.tagName === 'TABLE' || (node.querySelector && node.querySelector('table'))) {
+                    hasTableAdded = true;
+                  }
+                }
+              });
+            }
+          });
+          
+          if (hasTableAdded) {
+            debugLog('MutationObserver: Table added to reading view, applying colors');
+            if (debounceId) clearTimeout(debounceId);
+            debounceId = setTimeout(() => {
+              checkAndApply();
+            }, 80);
+          }
         });
 
         observer.observe(el, { childList: true, subtree: true });
 
-        checkAndApply();
-
-        // Add scroll listener to reapply colors on scroll
+        // Add scroll listener to reapply colors on scroll (for lazy-loaded tables)
         try {
           const scrollContainer = el.parentElement || el;
           scrollListener = () => {
             if (scrollDebounceId) clearTimeout(scrollDebounceId);
             scrollDebounceId = setTimeout(() => {
-              this.applyColorsToContainer(el, fileId);
+              // Check if element is still connected before applying
+              if (el.isConnected) {
+                debugLog('Scroll detected in reading view, checking for new tables');
+                this.applyColorsToContainer(el, fileId);
+              } else {
+                safeDisconnect();
+              }
             }, 100);
           };
           scrollContainer.addEventListener('scroll', scrollListener, { passive: true });
         } catch (e) { /* ignore if scroll listener fails */ }
 
-        // Keep observer alive for longer to catch dynamic content
-        setTimeout(() => { safeDisconnect(); }, 10000);
+        // Store observer reference for cleanup
+        this._containerObservers.set(el, {
+          observer,
+          debounceId,
+          scrollListener,
+          scrollDebounceId,
+          safeDisconnect
+        });
+
+        checkAndApply();
+
+        // Check periodically if element is still connected
+        const connectionChecker = setInterval(() => {
+          if (!el.isConnected) {
+            safeDisconnect();
+            clearInterval(connectionChecker);
+          }
+        }, 2000);
+        
+        // Auto-cleanup after reasonable time
+        setTimeout(() => { 
+          clearInterval(connectionChecker);
+          safeDisconnect(); 
+        }, 30000);
+        
       } catch (e) { /* ignore if MutationObserver unsupported */ }
     });
+
+    // Also add a global observer specifically for reading mode tables
+    try {
+      const readingViewObserver = new MutationObserver((mutations) => {
+        const file = this.app.workspace.getActiveFile();
+        if (!file) return;
+        
+        mutations.forEach(mutation => {
+          if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+            let hasNewTable = false;
+            mutation.addedNodes.forEach(node => {
+              if (node.nodeType === 1) {
+                // Check if a table was added to reading view
+                if (node.matches && node.matches('table') && node.closest('.markdown-preview-view')) {
+                  hasNewTable = true;
+                } else if (node.querySelectorAll) {
+                  const tables = node.querySelectorAll('table');
+                  if (tables.length > 0 && node.closest('.markdown-preview-view')) {
+                    hasNewTable = true;
+                  }
+                }
+              }
+            });
+            
+            if (hasNewTable) {
+              debugLog('Global observer: New table detected in reading view, applying colors');
+              // Find all reading views and apply colors
+              document.querySelectorAll('.markdown-preview-view').forEach(view => {
+                if (view.isConnected) {
+                  this.applyColorsToContainer(view, file.path);
+                }
+              });
+            }
+          }
+        });
+      });
+      
+      // Observe the entire document body for new reading view tables
+      readingViewObserver.observe(document.body, { childList: true, subtree: true });
+      this._readingViewObserver = readingViewObserver;
+    } catch (e) {
+      debugWarn('Failed to setup reading view observer:', e);
+    }
+
+    // Setup reading view scroll listener for lazy-loaded tables
+    this.setupReadingViewScrollListener();
+
+    // Start periodic checker for reading mode tables
+    this.startReadingModeTableChecker();
+
+    // Enhanced global observer to restore colors from data attributes when DOM recreates cells
+    try {
+      const globalObserver = new MutationObserver((mutations) => {
+        mutations.forEach(mutation => {
+          if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+            mutation.addedNodes.forEach(node => {
+              if (node.nodeType === 1) {
+                // Check for cells with data attributes
+                if (node.matches && node.matches('[data-ctc-bg], [data-ctc-color]')) {
+                  this.restoreColorsFromAttributes(node);
+                }
+                // Check descendants
+                if (node.querySelectorAll) {
+                  node.querySelectorAll('[data-ctc-bg], [data-ctc-color]').forEach(cell => {
+                    this.restoreColorsFromAttributes(cell);
+                  });
+                }
+              }
+            });
+          }
+        });
+      });
+      
+      globalObserver.observe(document.body, { childList: true, subtree: true });
+      this._globalObserver = globalObserver;
+    } catch (e) {
+      debugWarn('Failed to setup global observer:', e);
+    }
 
     if (this.settings.enableContextMenu) {
       this.registerDomEvent(document, "contextmenu", (evt) => {
@@ -284,28 +600,37 @@ module.exports = class TableColorPlugin extends Plugin {
               .onClick(() => this.pickColor(cell, tableEl, "bg"))
         );
         menu.addSeparator();
-        menu.addItem(item =>
-          item.setTitle("Color Whole Row Text")
-              .setIcon('rows-3')
-              .onClick(() => this.pickColorForRow(cell, tableEl, "color"))
-        );
-        menu.addItem(item =>
-          item.setTitle("Color Whole Row Background")
-              .setIcon('droplet')
-              .onClick(() => this.pickColorForRow(cell, tableEl, "bg"))
-        );
-        menu.addSeparator();
-        menu.addItem(item =>
-          item.setTitle("Color Whole Column Text")
-              .setIcon('columns-3')
-              .onClick(() => this.pickColorForColumn(cell, tableEl, "color"))
-        );
-        menu.addItem(item =>
-          item.setTitle("Color Whole Column Background")
-              .setIcon('droplet')
-              .onClick(() => this.pickColorForColumn(cell, tableEl, "bg"))
-        );
-        menu.addSeparator();
+        
+        // Row coloring options - conditional on setting
+        if (this.settings.showColorRowInMenu) {
+          menu.addItem(item =>
+            item.setTitle("Color Whole Row Text")
+                .setIcon('rows-3')
+                .onClick(() => this.pickColorForRow(cell, tableEl, "color"))
+          );
+          menu.addItem(item =>
+            item.setTitle("Color Whole Row Background")
+                .setIcon('droplet')
+                .onClick(() => this.pickColorForRow(cell, tableEl, "bg"))
+          );
+          menu.addSeparator();
+        }
+        
+        // Column coloring options - conditional on setting
+        if (this.settings.showColorColumnInMenu) {
+          menu.addItem(item =>
+            item.setTitle("Color Whole Column Text")
+                .setIcon('columns-3')
+                .onClick(() => this.pickColorForColumn(cell, tableEl, "color"))
+          );
+          menu.addItem(item =>
+            item.setTitle("Color Whole Column Background")
+                .setIcon('droplet')
+                .onClick(() => this.pickColorForColumn(cell, tableEl, "bg"))
+          );
+          menu.addSeparator();
+        }
+        
         menu.addItem(item =>
           item.setTitle("Color Multiple Cells by Rule")
               .setIcon('grid')
@@ -314,39 +639,60 @@ module.exports = class TableColorPlugin extends Plugin {
                 setTimeout(() => {
                   if (this.app.setting && typeof this.app.setting.openTabById === 'function') {
                     this.app.setting.openTabById('color-table-cell');
+                    // Scroll to Coloring Rules heading
+                    setTimeout(() => {
+                      const settingsContainer = document.querySelector('.vertical-tabs-container');
+                      if (settingsContainer) {
+                        const rulesHeading = Array.from(settingsContainer.querySelectorAll('h3')).find(el => el.textContent.includes('Coloring Rules'));
+                        if (rulesHeading) {
+                          rulesHeading.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }
+                      }
+                    }, 100);
                   }
                 }, 250);
               })
         );
         menu.addSeparator();
-        menu.addItem(item =>
-          item.setTitle("Undo Last Color Change")
-              .setIcon('undo')
-              .setDisabled(this.undoStack.length === 0)
-              .onClick(() => this.undo())
-        );
-        menu.addItem(item =>
-          item.setTitle("Redo Last Color Change")
-              .setIcon('redo')
-              .setDisabled(this.redoStack.length === 0)
-              .onClick(() => this.redo())
-        );
-        menu.addSeparator();
+        
+        // Undo/Redo options - conditional on setting
+        if (this.settings.showUndoRedoInMenu) {
+          menu.addItem(item =>
+            item.setTitle("Undo Last Color Change")
+                .setIcon('undo')
+                .setDisabled(this.undoStack.length === 0)
+                .onClick(() => this.undo())
+          );
+          menu.addItem(item =>
+            item.setTitle("Redo Last Color Change")
+                .setIcon('redo')
+                .setDisabled(this.redoStack.length === 0)
+                .onClick(() => this.redo())
+          );
+          menu.addSeparator();
+        }
+        
         menu.addItem(item =>
           item.setTitle("Reset Cell Coloring")
               .setIcon('trash-2')
               .onClick(async () => this.resetCell(cell, tableEl))
         );
-        menu.addItem(item =>
-          item.setTitle("Remove Row Coloring")
-              .setIcon('rows-3')
-              .onClick(async () => this.resetRow(cell, tableEl))
-        );
-        menu.addItem(item =>
-          item.setTitle("Remove Column Coloring")
-              .setIcon('columns-3')
-              .onClick(async () => this.resetColumn(cell, tableEl))
-        );
+        
+        if (this.settings.showColorRowInMenu) {
+          menu.addItem(item =>
+            item.setTitle("Remove Row Coloring")
+                .setIcon('rows-3')
+                .onClick(async () => this.resetRow(cell, tableEl))
+          );
+        }
+        
+        if (this.settings.showColorColumnInMenu) {
+          menu.addItem(item =>
+            item.setTitle("Remove Column Coloring")
+                .setIcon('columns-3')
+                .onClick(async () => this.resetColumn(cell, tableEl))
+          );
+        }
         try {
           if (menu.containerEl && menu.containerEl.classList) menu.containerEl.classList.add('mod-shadow');
           if (menu.menuEl && menu.menuEl.classList) menu.menuEl.classList.add('mod-shadow');
@@ -393,6 +739,21 @@ module.exports = class TableColorPlugin extends Plugin {
         this._livePreviewObserver = null;
       }
     } catch (e) { }
+    
+    // Clean up all container observers to prevent memory leaks
+    try {
+      if (this._containerObservers) {
+        for (const [el, observerData] of this._containerObservers.entries()) {
+          try {
+            if (observerData && typeof observerData.disconnect === 'function') {
+              observerData.disconnect();
+            }
+          } catch (e) { /* ignore */ }
+        }
+        this._containerObservers.clear();
+      }
+    } catch (e) { }
+    
     try {
       if (this.settings?.persistUndoHistory) {
         this.saveUndoRedoStacks();
@@ -403,18 +764,21 @@ module.exports = class TableColorPlugin extends Plugin {
   async loadSettings() {
     const data = await this.loadData();
     this.settings = Object.assign({
-      defaultBgColor: "#331717",
-      defaultTextColor: "#ffb2b2",
+
 
       enableContextMenu: true,
-      rules: [],
+      showColorRowInMenu: true,
+      showColorColumnInMenu: true,
+      showUndoRedoInMenu: true,
+      coloringRules: [],
+      coloringSort: 'lastAdded',
       advancedRules: [],
-      numericRules: [], // { op: 'lt'|'gt'|'eq'|'le'|'ge', value: number, color: string, bg: string }
-      numericStrict: true, // Only apply numeric rules to pure numbers
+      numericStrict: true,
   livePreviewColoring: false,
   persistUndoHistory: true,
   recentColors: [],
-  presetColors: []
+  presetColors: [],
+  processAllCellsOnOpen: false // Process all cells when file opens, not just visible ones
     }, data?.settings || {});
     if (Array.isArray(this.settings.presetColors)) {
       this.settings.presetColors = this.settings.presetColors.map(pc => {
@@ -870,7 +1234,7 @@ module.exports = class TableColorPlugin extends Plugin {
 
   async pickColor(cell, tableEl, type) {
     const CustomColorPickerMenu = this.createColorPickerMenu();
-    const initialColor = type === 'bg' ? this.settings.defaultBgColor : this.settings.defaultTextColor;
+    const initialColor = null;
     // Use the cell as anchor for menu position
     const menu = new CustomColorPickerMenu(this, async (pickedColor) => {
       // Save color on close
@@ -921,7 +1285,7 @@ module.exports = class TableColorPlugin extends Plugin {
 
   async pickColorForRow(cell, tableEl, type) {
     const CustomColorPickerMenu = this.createColorPickerMenu();
-    const initialColor = type === 'bg' ? this.settings.defaultBgColor : this.settings.defaultTextColor;
+    const initialColor = null;
     const row = cell.closest('tr');
     const rowCells = Array.from(row.querySelectorAll('td, th'));
     
@@ -977,7 +1341,7 @@ module.exports = class TableColorPlugin extends Plugin {
 
   async pickColorForColumn(cell, tableEl, type) {
     const CustomColorPickerMenu = this.createColorPickerMenu();
-    const initialColor = type === 'bg' ? this.settings.defaultBgColor : this.settings.defaultTextColor;
+    const initialColor = null;
     const colIndex = Array.from(cell.closest('tr').querySelectorAll('td, th')).indexOf(cell);
     
     // Collect all cells in the column for preview
@@ -1290,79 +1654,6 @@ module.exports = class TableColorPlugin extends Plugin {
     }
   }
 
-  evaluateAdvancedRule(rule, cellText) {
-    if (!rule || !Array.isArray(rule.conditions)) return false;
-    const logic = (rule.logic || 'AND').toUpperCase();
-    const text = (cellText || '').trim();
-    const numCandidate = parseFloat(text.replace(/,/g, ''));
-    const numericVal = isNaN(numCandidate) ? null : numCandidate;
-    const dateCandidate = Date.parse(text);
-    const dateVal = isNaN(dateCandidate) ? null : new Date(dateCandidate).getTime();
-    const evalCond = (cond) => {
-      const type = (cond.type || 'text').toLowerCase();
-      const op = (cond.operator || cond.op || 'contains').toLowerCase();
-      if (type === 'empty') {
-        return text.length === 0;
-      }
-      if (type === 'text') {
-        const cs = !!cond.caseSensitive;
-        const m = String(cond.value != null ? cond.value : cond.match || '');
-        const th = cs ? text : text.toLowerCase();
-        const mh = cs ? m : m.toLowerCase();
-        if (op === 'contains') return th.includes(mh);
-        if (op === 'equals') return th === mh;
-        if (op === 'startswith') return th.startsWith(mh);
-        if (op === 'endswith') return th.endsWith(mh);
-        return false;
-      }
-      if (type === 'regex') {
-        try {
-          const flags = cond.flags || (cond.caseSensitive ? 'g' : 'gi');
-          const re = new RegExp(String(cond.value != null ? cond.value : cond.match || ''), flags);
-          return re.test(text);
-        } catch (e) { return false; }
-      }
-      if (type === 'numeric') {
-        if (numericVal === null) return false;
-        const v = Number(cond.value);
-        if (op === 'between') {
-          const v2 = Number(cond.value2);
-          if (isNaN(v) || isNaN(v2)) return false;
-          const min = Math.min(v, v2), max = Math.max(v, v2);
-          return numericVal >= min && numericVal <= max;
-        }
-        if (op === 'lt') return numericVal < v;
-        if (op === 'le') return numericVal <= v;
-        if (op === 'eq') return numericVal === v;
-        if (op === 'ge') return numericVal >= v;
-        if (op === 'gt') return numericVal > v;
-        return false;
-      }
-      if (type === 'date') {
-        if (dateVal === null) return false;
-        const vStr = String(cond.value || '');
-        const v2Str = String(cond.value2 || '');
-        const v = Date.parse(vStr);
-        const v2 = Date.parse(v2Str);
-        if (op === 'between') {
-          if (isNaN(v) || isNaN(v2)) return false;
-          const min = Math.min(v, v2), max = Math.max(v, v2);
-          return dateVal >= min && dateVal <= max;
-        }
-        if (op === 'before') return !isNaN(v) && dateVal < v;
-        if (op === 'after') return !isNaN(v) && dateVal > v;
-        return false;
-      }
-      return false;
-    };
-    if (logic === 'AND') {
-      for (const c of rule.conditions) { if (!evalCond(c)) return false; }
-      return true;
-    }
-    for (const c of rule.conditions) { if (evalCond(c)) return true; }
-    return false;
-  }
-
   async saveUndoRedoStacks() {
     try {
       localStorage.setItem('table-color-undo-stack', JSON.stringify(this.undoStack));
@@ -1413,6 +1704,298 @@ module.exports = class TableColorPlugin extends Plugin {
     return text.trim();
   }
 
+  // Helper method to check if element is visible in viewport
+  isElementVisible(element) {
+    if (!element || !element.getBoundingClientRect) return false;
+    const rect = element.getBoundingClientRect();
+    return (
+      rect.top >= 0 &&
+      rect.left >= 0 &&
+      rect.bottom <= (window.innerHeight || document.documentElement.clientHeight) &&
+      rect.right <= (window.innerWidth || document.documentElement.clientWidth)
+    );
+  }
+
+  // Optimized method to apply all rules to a single cell
+  applyRulesToCell(cell, cellText, colorData) {
+    if (colorData) {
+      if (colorData.bg) cell.style.backgroundColor = colorData.bg;
+      if (colorData.color) cell.style.color = colorData.color;
+    }
+  }
+
+  // Evaluate a value against a rule's MATCH type
+  evaluateMatch(text, rule) {
+    const val = rule.value ?? '';
+    const t = (text ?? '').trim();
+    const isEmpty = t.length === 0;
+
+    const toNumber = (s) => {
+      const cleaned = String(s).replace(/,/g, '');
+      const n = parseFloat(cleaned);
+      if (this.settings.numericStrict) {
+        const ok = /^-?\d{1,3}(,\d{3})*(\.\d+)?$|^-?\d+(\.\d+)?$/.test(String(s).trim());
+        return ok ? n : NaN;
+      }
+      return isNaN(n) ? NaN : n;
+    };
+
+    switch (rule.match) {
+      case 'is':
+        return t === String(val);
+      case 'isNot':
+        return t !== String(val);
+      case 'isRegex':
+        try {
+          const rx = new RegExp(String(val), 'i');
+          return rx.test(t);
+        } catch { return false; }
+      case 'contains':
+        return t.toLowerCase().includes(String(val).toLowerCase());
+      case 'notContains':
+        return !t.toLowerCase().includes(String(val).toLowerCase());
+      case 'startsWith':
+        return t.toLowerCase().startsWith(String(val).toLowerCase());
+      case 'endsWith':
+        return t.toLowerCase().endsWith(String(val).toLowerCase());
+      case 'notStartsWith':
+        return !t.toLowerCase().startsWith(String(val).toLowerCase());
+      case 'notEndsWith':
+        return !t.toLowerCase().endsWith(String(val).toLowerCase());
+      case 'isEmpty':
+        return isEmpty;
+      case 'isNotEmpty':
+        return !isEmpty;
+      case 'eq': {
+        const n = toNumber(t); const v = toNumber(val);
+        if (isNaN(n) || isNaN(v)) return false;
+        return n === v;
+      }
+      case 'gt': {
+        const n = toNumber(t); const v = toNumber(val);
+        if (isNaN(n) || isNaN(v)) return false;
+        return n > v;
+      }
+      case 'lt': {
+        const n = toNumber(t); const v = toNumber(val);
+        if (isNaN(n) || isNaN(v)) return false;
+        return n < v;
+      }
+      case 'ge': {
+        const n = toNumber(t); const v = toNumber(val);
+        if (isNaN(n) || isNaN(v)) return false;
+        return n >= v;
+      }
+      case 'le': {
+        const n = toNumber(t); const v = toNumber(val);
+        if (isNaN(n) || isNaN(v)) return false;
+        return n <= v;
+      }
+      default:
+        return false;
+    }
+  }
+
+  applyColoringRulesToTable(tableEl) {
+    const rules = Array.isArray(this.settings.coloringRules) ? this.settings.coloringRules : [];
+    if (!rules.length) return;
+
+    const rows = Array.from(tableEl.querySelectorAll('tr'));
+    const getCell = (r, c) => {
+      const row = rows[r];
+      if (!row) return null;
+      const cells = Array.from(row.querySelectorAll('td, th'));
+      return cells[c] || null;
+    };
+    const texts = rows.map(row => Array.from(row.querySelectorAll('td, th')).map(cell => this.getCellText(cell)));
+    const maxCols = Math.max(0, ...texts.map(r => r.length));
+
+    const headerRowIndex = rows.findIndex(r => r.querySelector('th'));
+    const hdr = headerRowIndex >= 0 ? headerRowIndex : 0;
+    const firstDataRowIndex = rows.findIndex(r => r.querySelector('td'));
+    const fdr = firstDataRowIndex >= 0 ? firstDataRowIndex : 0;
+
+    for (const rule of rules) {
+      if (!rule || !rule.target || !rule.match) continue;
+      const applyCellStyle = (cell) => {
+        if (!cell) return;
+        if (cell.hasAttribute('data-ctc-manual')) return;
+        if (rule.bg) cell.style.backgroundColor = rule.bg;
+        if (rule.color) cell.style.color = rule.color;
+      };
+
+      if (rule.target === 'cell') {
+        for (let r = 0; r < rows.length; r++) {
+          for (let c = 0; c < (texts[r]?.length || 0); c++) {
+            const text = texts[r][c];
+            if ((rule.when || 'theCell') === 'theCell') {
+              if (this.evaluateMatch(text, rule)) {
+                applyCellStyle(getCell(r, c));
+              }
+            }
+          }
+        }
+      } else if (rule.target === 'row') {
+        const candidateRows = (rule.when === 'firstRow') ? [fdr] : Array.from({ length: rows.length }, (_, i) => i);
+        for (const r of candidateRows) {
+          const rowTexts = texts[r] || [];
+          let cond = false;
+          if (rule.when === 'allCell') cond = rowTexts.length > 0 && rowTexts.every(t => this.evaluateMatch(t, rule));
+          else if (rule.when === 'noCell') cond = rowTexts.every(t => !this.evaluateMatch(t, rule));
+          else cond = rowTexts.some(t => this.evaluateMatch(t, rule)); // anyCell or firstRow default any
+          if (cond) {
+            const cells = Array.from(rows[r].querySelectorAll('td, th'));
+            cells.forEach(applyCellStyle);
+          }
+        }
+      } else if (rule.target === 'column') {
+        const candidateCols = Array.from({ length: maxCols }, (_, i) => i);
+        for (const c of candidateCols) {
+          let cond = false;
+          if (rule.when === 'columnHeader') {
+            const text = texts[hdr]?.[c] ?? '';
+            cond = this.evaluateMatch(text, rule);
+          } else {
+            const colTexts = Array.from({ length: rows.length }, (_, r) => texts[r]?.[c]).filter(t => t !== undefined);
+            if (rule.when === 'allCell') cond = colTexts.length > 0 && colTexts.every(t => this.evaluateMatch(t, rule));
+            else if (rule.when === 'noCell') cond = colTexts.every(t => !this.evaluateMatch(t, rule));
+            else cond = colTexts.some(t => this.evaluateMatch(t, rule)); // anyCell default
+          }
+          if (cond) {
+            for (let r = 0; r < rows.length; r++) applyCellStyle(getCell(r, c));
+          }
+        }
+      }
+    }
+  }
+
+  applyAdvancedRulesToTable(tableEl) {
+    const adv = Array.isArray(this.settings.advancedRules) ? this.settings.advancedRules : [];
+    if (!adv.length) return;
+    const rows = Array.from(tableEl.querySelectorAll('tr'));
+    const texts = rows.map(row => Array.from(row.querySelectorAll('td, th')).map(cell => this.getCellText(cell)));
+    const maxCols = Math.max(0, ...texts.map(r => r.length));
+    const headerRowIndex = rows.findIndex(r => r.querySelector('th'));
+    const hdr = headerRowIndex >= 0 ? headerRowIndex : 0;
+    const firstDataRowIndex = rows.findIndex(r => r.querySelector('td'));
+    const fdr = firstDataRowIndex >= 0 ? firstDataRowIndex : 0;
+    const getCell = (r, c) => { const row = rows[r]; if (!row) return null; const cells = Array.from(row.querySelectorAll('td, th')); return cells[c] || null; };
+
+    const evalCondCell = (r, c, cond) => this.evaluateMatch(texts[r]?.[c] ?? '', { match: cond.match, value: cond.value });
+    const evalCondRow = (r, cond) => { const rowTexts = texts[r] || []; return rowTexts.some(t => this.evaluateMatch(t, { match: cond.match, value: cond.value })); };
+    const evalCondHeader = (c, cond) => this.evaluateMatch(texts[hdr]?.[c] ?? '', { match: cond.match, value: cond.value });
+
+    for (const rule of adv) {
+      const logic = rule.logic || 'any';
+      const target = rule.target || 'cell';
+      const color = rule.color || null;
+      const bg = rule.bg || null;
+      if (!bg && !color) continue;
+      const conditions = Array.isArray(rule.conditions) ? rule.conditions : [];
+      if (!conditions.length) continue;
+
+      if (target === 'row') {
+        const candidateRows = rule.when === 'firstRow' ? [fdr] : Array.from({ length: rows.length }, (_, i) => i);
+        for (const r of candidateRows) {
+          const flags = conditions.map(cond => {
+            if (cond.when === 'columnHeader') {
+              // For row target with column header condition, check if ANY column header matches
+              for (let c = 0; c < maxCols; c++) { if (evalCondHeader(c, cond)) return true; }
+              return false;
+            } else if (cond.when === 'row') {
+              return evalCondRow(r, cond);
+            } else {
+              // anyCell, allCell, noCell for row target
+              const cells = Array.from(rows[r].querySelectorAll('td, th'));
+              const cellResults = cells.map((_, c) => evalCondCell(r, c, cond));
+              if (cond.when === 'allCell') return cellResults.every(Boolean);
+              if (cond.when === 'noCell') return cellResults.every(f => !f);
+              return cellResults.some(Boolean); // anyCell
+            }
+          });
+          let ok = false;
+          if (logic === 'all') ok = flags.every(Boolean);
+          else if (logic === 'none') ok = flags.every(f => !f);
+          else ok = flags.some(Boolean);
+          if (ok) {
+            Array.from(rows[r].querySelectorAll('td, th')).forEach(cell => { if (bg) cell.style.backgroundColor = bg; if (color) cell.style.color = color; });
+          }
+        }
+      } else if (target === 'column') {
+        for (let c = 0; c < maxCols; c++) {
+          const flags = conditions.map(cond => {
+            if (cond.when === 'columnHeader') return evalCondHeader(c, cond);
+            if (cond.when === 'row') return false;
+            // anyCell, allCell, noCell for column
+            const colCells = [];
+            for (let r = 0; r < rows.length; r++) { 
+              colCells.push(evalCondCell(r, c, cond));
+            }
+            if (cond.when === 'allCell') return colCells.every(Boolean);
+            if (cond.when === 'noCell') return colCells.every(f => !f);
+            return colCells.some(Boolean); // anyCell
+          });
+          let ok = false;
+          if (logic === 'all') ok = flags.every(Boolean);
+          else if (logic === 'none') ok = flags.every(f => !f);
+          else ok = flags.some(Boolean);
+          if (ok) { for (let r = 0; r < rows.length; r++) { const cell = getCell(r, c); if (cell) { if (bg) cell.style.backgroundColor = bg; if (color) cell.style.color = color; } } }
+        }
+      } else {
+        // target === 'cell' - color individual cells
+        for (let r = 0; r < rows.length; r++) {
+          for (let c = 0; c < (texts[r]?.length || 0); c++) {
+            const flags = conditions.map(cond => {
+              if (cond.when === 'columnHeader') {
+                // For cell target: check if the column header matches
+                return evalCondHeader(c, cond);
+              } else if (cond.when === 'row') {
+                // For cell target: check if any cell in the row matches
+                return evalCondRow(r, cond);
+              } else if (cond.when === 'anyCell' || cond.when === 'allCell' || cond.when === 'noCell') {
+                // For cell target with these conditions, evaluate the specific cell
+                const cellMatch = evalCondCell(r, c, cond);
+                // Note: allCell and noCell don't make sense for individual cells, but we'll treat them as the cell match
+                return cellMatch;
+              } else {
+                // Default: check the specific cell
+                return evalCondCell(r, c, cond);
+              }
+            });
+            let ok = false;
+            if (logic === 'all') ok = flags.every(Boolean);
+            else if (logic === 'none') ok = flags.every(f => !f);
+            else ok = flags.some(Boolean);
+            if (ok) { 
+              const cell = getCell(r, c); 
+              if (cell) { 
+                if (bg) cell.style.backgroundColor = bg; 
+                if (color) cell.style.color = color; 
+              } 
+            }
+          }
+        }
+      }
+    }
+  }
+
+  restoreColorsFromAttributes(element) {
+    if (!element || !element.style) return;
+    
+    if (element.hasAttribute('data-ctc-bg')) {
+      const bg = element.getAttribute('data-ctc-bg');
+      if (bg && bg !== element.style.backgroundColor) {
+        element.style.backgroundColor = bg;
+      }
+    }
+    if (element.hasAttribute('data-ctc-color')) {
+      const color = element.getAttribute('data-ctc-color');
+      if (color && color !== element.style.color) {
+        element.style.color = color;
+      }
+    }
+  }
+
   applyColorsToContainer(container, filePath) {
     // Only apply colors in Reading mode or Live Preview if enabled
     const hasClosest = typeof container.closest === 'function';
@@ -1450,98 +2033,75 @@ module.exports = class TableColorPlugin extends Plugin {
     if (!inPreview && !inEditor && !(container.classList && container.classList.contains('cm-content'))) {
       return;
     }
+    
+    // Performance optimization: Debounce rapid calls
+    const now = Date.now();
+    const lastCall = this._lastApplyCall || 0;
+    if (now - lastCall < 100) { // Debounce to 100ms
+      return;
+    }
+    this._lastApplyCall = now;
+    debugLog(`=== applyColorsToContainer called ===`);
+    debugLog(`container:`, container);
+    // Special handling for reading mode: always process all tables in the view
+    if (inPreview) {
+      // Check if this is a reading view container
+      const readingView = container.closest('.markdown-preview-view');
+      if (readingView) {
+        // Process ALL tables in the reading view, not just in this container
+        const allTablesInView = Array.from(readingView.querySelectorAll('table'));
+        debugLog(`Reading mode: found ${allTablesInView.length} total tables in view`);
+        
+        // If we have tables but they're not all in our container, process the entire view
+        if (allTablesInView.length > 0 && allTablesInView.some(table => !container.contains(table))) {
+          debugLog('Processing entire reading view for comprehensive coloring');
+          container = readingView; // Process the entire reading view
+        }
+      }
+    }
+    
+    const tables = Array.from(container.querySelectorAll('table'));
+    if (!tables.length) return;
     const noteData = this.cellData[filePath] || {};
-    container.querySelectorAll("table").forEach((tableEl, tableIndex) => {
-      const tableKey = `table_${tableIndex}`;
-      const tableColors = noteData[tableKey] || {};
-      tableEl.querySelectorAll("tr").forEach((tr, rowIndex) => {
-        const rowKey = `row_${rowIndex}`;
-        tr.querySelectorAll("td, th").forEach((cell, colIndex) => {
-          const colKey = `col_${colIndex}`;
-          const colorData = tableColors[rowKey]?.[colKey];
-          
-          // Get clean cell text without editor markup
-          const cellText = this.getCellText(cell);
-          
-          // Preserve existing colors if colors are already applied
-          const hasExistingStyles = cell.style.backgroundColor || cell.style.color;
-          
-          // Clear colors only if we're not in the middle of applying them
-          if (!hasExistingStyles) {
-            cell.style.backgroundColor = "";
-            cell.style.color = "";
-          }
-          
-          
-          this.settings.rules.forEach(rule => {
-            let matches = false;
-            try {
-              if (rule.regex) {
-                // Use regex pattern matching
-                const flags = rule.caseSensitive ? 'g' : 'gi';
-                const regex = new RegExp(rule.match, flags);
-                matches = regex.test(cellText);
-              } else {
-                // Use simple text matching
-                if (rule.caseSensitive) {
-                  matches = cellText.includes(rule.match);
-                } else {
-                  matches = cellText.toLowerCase().includes(rule.match.toLowerCase());
-                }
-              }
-            } catch (e) {
-              // Fallback to simple includes on regex error
-              matches = cellText.includes(rule.match);
-            }
-            
-            if (matches) {
-              if (rule.bg) cell.style.backgroundColor = rule.bg;
-              if (rule.color) cell.style.color = rule.color;
-            }
-          });
-          
-          if (this.settings.numericRules && this.settings.numericRules.length) {
-            let text = cellText.trim();
-            let isNumber = false;
-            if (this.settings.numericStrict) {
-              isNumber = /^-?\d{1,3}(,\d{3})*(\.\d+)?$|^-?\d+(\.\d+)?$/.test(text);
-            } else {
-              isNumber = !isNaN(parseFloat(text.replace(/,/g, '')));
-            }
-            if (isNumber) {
-              const num = parseFloat(text.replace(/,/g, ''));
-              for (const nRule of this.settings.numericRules) {
-                let match = false;
-                switch (nRule.op) {
-                  case 'lt': match = num < nRule.value; break;
-                  case 'gt': match = num > nRule.value; break;
-                  case 'eq': match = num === nRule.value; break;
-                  case 'le': match = num <= nRule.value; break;
-                  case 'ge': match = num >= nRule.value; break;
-                }
-                if (match) {
-                  if (nRule.bg) cell.style.backgroundColor = nRule.bg;
-                  if (nRule.color) cell.style.color = nRule.color;
-                  break;
-                }
-              }
-            }
-          }
-          if (Array.isArray(this.settings.advancedRules) && this.settings.advancedRules.length) {
-            for (const aRule of this.settings.advancedRules) {
-              if (this.evaluateAdvancedRule(aRule, cellText)) {
-                if (aRule.bg) cell.style.backgroundColor = aRule.bg;
-                if (aRule.color) cell.style.color = aRule.color;
-              }
-            }
-          }
-          // Now apply single cell coloring so it overrides rule-based coloring
-          if (colorData) {
-            if (colorData.bg) cell.style.backgroundColor = colorData.bg;
-            if (colorData.color) cell.style.color = colorData.color;
-          }
+    
+    debugLog(`applyColorsToContainer: filePath=${filePath}, found ${tables.length} tables, has noteData:`, Object.keys(noteData).length > 0, 'inPreview:', inPreview, 'inEditor:', inEditor);
+    // Get ALL tables in the correct scope
+    let allTables = [];
+    if (inPreview) {
+      // In reading mode, use tables from the markdown-preview-view
+      const previewRoot = container.closest('.markdown-preview-view');
+      if (previewRoot) {
+        allTables = Array.from(previewRoot.querySelectorAll('table'));
+      } else {
+        allTables = Array.from(document.querySelectorAll('.markdown-preview-view table'));
+      }
+    } else if (inEditor) {
+      // In live preview, use tables from all cm-content editors for this file
+      const file = this.app.workspace.getActiveFile();
+      if (file) {
+        const editors = Array.from(document.querySelectorAll('.cm-content'));
+        allTables = [];
+        editors.forEach(editor => {
+          allTables.push(...Array.from(editor.querySelectorAll('table')));
         });
-      });
+      }
+    } else {
+      allTables = Array.from(container.querySelectorAll('table'));
+    }
+
+    debugLog(`All tables in scope: ${allTables.length}, container tables: ${tables.length}, inPreview: ${inPreview}, inEditor: ${inEditor}`);
+
+    // Process each table
+    tables.forEach((tableEl) => {
+      const globalTableIndex = allTables.indexOf(tableEl);
+      if (globalTableIndex === -1) {
+        debugWarn(`Could not find table in global list, using local index`);
+        const containerTables = Array.from(container.querySelectorAll('table'));
+        const fallbackIndex = containerTables.indexOf(tableEl);
+        this.processSingleTable(tableEl, fallbackIndex, filePath, noteData);
+      } else {
+        this.processSingleTable(tableEl, globalTableIndex, filePath, noteData);
+      }
     });
     // In Reading mode, retry applying colors with escalating delays if needed
     try {
@@ -1558,27 +2118,168 @@ module.exports = class TableColorPlugin extends Plugin {
       }
     } catch (e) { }
   }
-  // Refresh the currently active file's rendered view
   applyColorsToActiveFile() {
-    const activeView = this.app.workspace.getActiveViewOfType(require('obsidian').MarkdownView);
-    const filePath = this.app.workspace.getActiveFile()?.path;
-    if (!activeView || !filePath) return;
+    debugLog('applyColorsToActiveFile called');
+    const file = this.app.workspace.getActiveFile();
+    if (!file) return;
     
-    // Try to find preview element with retries, as it may not be rendered yet
-    let attempts = 0;
-    const maxAttempts = 8;
-    const tryApplyColors = () => {
-      attempts++;
-      const previewEl = activeView.contentEl.querySelector('.markdown-preview-view');
-      if (previewEl) {
-        this.applyColorsToContainer(previewEl, filePath);
-      } else if (attempts < maxAttempts) {
-        // Retry with increasing delays
-        const delay = attempts <= 3 ? 50 : (attempts <= 5 ? 100 : 200);
-        setTimeout(tryApplyColors, delay);
+    // Apply to reading preview
+    const previewViews = document.querySelectorAll('.markdown-preview-view');
+    previewViews.forEach(view => {
+      if (view.isConnected) {
+        this.applyColorsToContainer(view, file.path);
       }
+    });
+    
+    // Apply to live preview if enabled
+    if (this.settings.livePreviewColoring) {
+      const cmEditors = document.querySelectorAll('.cm-content');
+      cmEditors.forEach(editor => {
+        if (editor.isConnected) {
+          this.applyColorsToContainer(editor, file.path);
+        }
+      });
+    }
+  }
+
+  processSingleTable(tableEl, tableIndex, filePath, noteData) {
+    debugLog(`Processing single table: index=${tableIndex}, has data-ctc-index: ${tableEl.getAttribute('data-ctc-index')}`);
+    
+    // Mark table with unique data attribute for persistence
+    if (!tableEl.hasAttribute('data-ctc-processed')) {
+      tableEl.setAttribute('data-ctc-processed', 'true');
+      tableEl.setAttribute('data-ctc-index', tableIndex);
+      tableEl.setAttribute('data-ctc-file', filePath);
+    }
+    
+    const tableKey = `table_${tableIndex}`;
+    const tableColors = noteData[tableKey] || {};
+    
+    debugLog(`Table index ${tableIndex}: key="${tableKey}", has colors:`, Object.keys(tableColors).length > 0);
+    
+    let coloredCount = 0;
+    const tableId = `${filePath}:${tableIndex}`;
+    Array.from(tableEl.querySelectorAll('tr')).forEach((tr, rIdx) => {
+      const rowKey = `row_${rIdx}`;
+      const rowColors = tableColors[rowKey] || {};
+      const cells = Array.from(tr.querySelectorAll('td, th'));
+      
+      cells.forEach((cell, cIdx) => {
+        const colorData = rowColors[`col_${cIdx}`];
+        if (colorData) {
+          coloredCount++;
+          if (colorData.bg) {
+            cell.style.backgroundColor = colorData.bg;
+            cell.setAttribute('data-ctc-bg', colorData.bg);
+          }
+          if (colorData.color) {
+            cell.style.color = colorData.color;
+            cell.setAttribute('data-ctc-color', colorData.color);
+          }
+          cell.setAttribute('data-ctc-manual', 'true');
+          cell.setAttribute('data-ctc-table-id', tableId);
+          cell.setAttribute('data-ctc-row', String(rIdx));
+          cell.setAttribute('data-ctc-col', String(cIdx));
+        }
+      });
+    });
+    
+    debugLog(`Table index ${tableIndex}: colored ${coloredCount} cells`);
+    
+    // Apply rules after manual; rule methods will skip cells marked as manual
+    this.applyColoringRulesToTable(tableEl);
+    this.applyAdvancedRulesToTable(tableEl);
+    
+    // Ensure colors persist by marking the table as processed
+    tableEl.setAttribute('data-ctc-last-processed', Date.now());
+    
+    return coloredCount;
+  }
+
+  setupReadingViewScrollListener() {
+    // Watch for scroll events in reading view to catch lazy-loaded tables
+    const handleReadingViewScroll = () => {
+      const file = this.app.workspace.getActiveFile();
+      if (!file) return;
+      
+      // Check if we're in reading mode
+      const readingViews = document.querySelectorAll('.markdown-preview-view');
+      if (readingViews.length === 0) return;
+      
+      // Debounce scroll events
+      if (this._readingScrollTimeout) clearTimeout(this._readingScrollTimeout);
+      this._readingScrollTimeout = setTimeout(() => {
+        debugLog('Reading view scroll detected, checking for new tables');
+        readingViews.forEach(view => {
+          if (view.isConnected) {
+            // Apply colors to the entire reading view (not just container)
+            this.applyColorsToContainer(view, file.path);
+          }
+        });
+      }, 150); // Slightly longer debounce for scroll
     };
-    tryApplyColors();
+    
+    // Add scroll listener to all reading views
+    const addScrollListeners = () => {
+      document.querySelectorAll('.markdown-preview-view').forEach(view => {
+        if (!view._ctcScrollListenerAdded) {
+          view.addEventListener('scroll', handleReadingViewScroll, { passive: true });
+          view._ctcScrollListenerAdded = true;
+          debugLog('Added scroll listener to reading view');
+        }
+      });
+    };
+    
+    // Initial setup
+    addScrollListeners();
+    
+    // Watch for new reading views being created
+    const readingViewObserver = new MutationObserver(() => {
+      addScrollListeners();
+    });
+    
+    readingViewObserver.observe(document.body, { childList: true, subtree: true });
+    this._readingViewScrollObserver = readingViewObserver;
+  }
+
+  startReadingModeTableChecker() {
+    // Stop any existing checker
+    if (this._readingModeChecker) clearInterval(this._readingModeChecker);
+    
+    this._readingModeChecker = setInterval(() => {
+      const file = this.app.workspace.getActiveFile();
+      if (!file) return;
+      
+      // Only run if we're in reading mode
+      const readingViews = document.querySelectorAll('.markdown-preview-view');
+      if (readingViews.length === 0) return;
+      
+      // Check if we have uncolored tables
+      let hasUncoloredTables = false;
+      readingViews.forEach(view => {
+        const tables = view.querySelectorAll('table');
+        tables.forEach(table => {
+          // Check if table has been processed
+          if (!table.hasAttribute('data-ctc-processed')) {
+            hasUncoloredTables = true;
+          }
+        });
+      });
+      
+      if (hasUncoloredTables) {
+        debugLog('Periodic check: Found uncolored tables in reading mode, applying colors');
+        readingViews.forEach(view => {
+          if (view.isConnected) {
+            this.applyColorsToContainer(view, file.path);
+          }
+        });
+      }
+    }, 2000); // Check every 2 seconds
+    
+    // Clean up on unload
+    this.register(() => {
+      if (this._readingModeChecker) clearInterval(this._readingModeChecker);
+    });
   }
 };
 
@@ -1681,12 +2382,30 @@ class ConditionRow {
     delBtn.textContent = 'Delete';
     const setOps = () => {
       const t = this.typeSel.value;
+      const currentOp = this.opSel.value; // Remember current selection
       this.opSel.empty();
-      if (t === 'text') ['contains','equals','startsWith','endsWith'].forEach(op => { const o = this.opSel.createEl('option'); o.value = op; o.text = op; });
-      else if (t === 'numeric') ['gt','ge','eq','le','lt','between'].forEach(op => { const o = this.opSel.createEl('option'); o.value = op; o.text = op; });
-      else if (t === 'date') ['before','after','between'].forEach(op => { const o = this.opSel.createEl('option'); o.value = op; o.text = op; });
-      else if (t === 'regex') ['matches'].forEach(op => { const o = this.opSel.createEl('option'); o.value = op; o.text = op; });
-      else { this.opSel.createEl('option', { text: 'isEmpty', attr: { value: 'isEmpty' } }); }
+      let options = [];
+      if (t === 'text') options = ['contains','equals','startsWith','endsWith'];
+      else if (t === 'numeric') options = ['gt','ge','eq','le','lt','between'];
+      else if (t === 'date') options = ['before','after','between'];
+      else if (t === 'regex') options = ['matches'];
+      else options = ['isEmpty'];
+      
+      options.forEach(op => { 
+        const o = this.opSel.createEl('option'); 
+        o.value = op; 
+        o.text = op; 
+        // Preserve selection if it exists in new options
+        if (currentOp && op === currentOp) {
+          o.selected = true;
+        }
+      });
+      
+      // If current selection wasn't preserved, select first option
+      if (!this.opSel.value && options.length > 0) {
+        this.opSel.value = options[0];
+      }
+      
       const op = this.opSel.value;
       const useTwo = op === 'between';
       this.val2Input.style.display = useTwo ? '' : 'none';
@@ -1718,80 +2437,111 @@ class ConditionRow {
   }
 }
 
-class AdvancedRuleModal extends Modal {
-  constructor(app, plugin, initialRule) {
+
+
+// Settings Tab
+// Release Notes Modal - displays latest release notes from GitHub
+class ReleaseNotesModal extends Modal {
+  constructor(app) {
     super(app);
-    this.plugin = plugin;
-    this.initialRule = initialRule || null;
-    this.onSave = null;
-    this.rows = [];
   }
+
   onOpen() {
     const { contentEl } = this;
     contentEl.empty();
-    Object.assign(contentEl.style, { padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px', minWidth: '520px' });
-    const title = contentEl.createEl('h3', { text: 'Advanced Rule Builder' });
-    const headerRow = contentEl.createDiv({ cls: 'pretty-flex' });
-    Object.assign(headerRow.style, { display: 'flex', alignItems: 'center', gap: '8px' });
-    const nameInput = headerRow.createEl('input', { type: 'text', attr: { placeholder: 'Rule name' } });
-    Object.assign(nameInput.style, { flex: '1', padding: '6px 8px' });
-    const logicSel = headerRow.createEl('select');
-    ['AND','OR'].forEach(x => { const o = logicSel.createEl('option'); o.value = x; o.text = x; });
-    const scopeSel = headerRow.createEl('select');
-    ['cell','row','column'].forEach(x => { const o = scopeSel.createEl('option'); o.value = x; o.text = x; });
-    const colorsRow = contentEl.createDiv({ cls: 'pretty-flex' });
-    Object.assign(colorsRow.style, { display: 'flex', alignItems: 'center', gap: '10px' });
-    const bgLabel = colorsRow.createEl('span', { text: 'Background:' });
-    const bgPick = colorsRow.createEl('input', { type: 'color' });
-    const colorLabel = colorsRow.createEl('span', { text: 'Text:' });
-    const colorPick = colorsRow.createEl('input', { type: 'color' });
-    colorPick.value = this.plugin.settings.defaultTextColor;
-    bgPick.value = this.plugin.settings.defaultBgColor;
-    const rowsContainer = contentEl.createDiv({ cls: 'rules-list' });
-    Object.assign(rowsContainer.style, { display: 'flex', flexDirection: 'column', gap: '8px' });
-    const actionsRow = contentEl.createDiv({ cls: 'pretty-flex' });
-    Object.assign(actionsRow.style, { display: 'flex', alignItems: 'center', gap: '8px' });
-    const addBtn = actionsRow.createEl('button', { cls: 'mod-cta' });
-    addBtn.textContent = 'Add Condition';
-    const addRow = (data) => {
-      const row = new ConditionRow(rowsContainer, this.rows.length, data, () => {});
-      this.rows.push(row);
-      this.rows.forEach((r, i) => { r.logicSel.style.display = i === this.rows.length - 1 ? 'none' : ''; });
-    };
-    addBtn.onclick = () => addRow();
-    const testBtn = actionsRow.createEl('button', { cls: 'mod-ghost' });
-    testBtn.textContent = 'Test';
-    testBtn.onclick = () => {
-      const rule = collect();
-      const activeView = this.plugin.app.workspace.getActiveViewOfType(require('obsidian').MarkdownView);
-      const filePath = this.plugin.app.workspace.getActiveFile()?.path;
-      if (!activeView || !filePath) return;
-      const previewEl = activeView.contentEl.querySelector('.markdown-preview-view');
-      if (!previewEl) return;
-      previewEl.querySelectorAll('td, th').forEach(c => { c.style.outline = ''; });
-      previewEl.querySelectorAll('td, th').forEach(c => { const txt = this.plugin.getCellText(c); if (this.plugin.evaluateAdvancedRule(rule, txt)) { c.style.outline = '2px solid var(--interactive-accent)'; } });
-      setTimeout(() => { previewEl.querySelectorAll('td, th').forEach(c => { c.style.outline = ''; }); }, 2000);
-    };
-    const saveBtn = actionsRow.createEl('button', { cls: 'mod-cta' });
-    saveBtn.textContent = 'Save Rule';
-    const collect = () => {
-      return { name: nameInput.value || '', conditions: this.rows.map(r => r.getData()), logic: logicSel.value, bg: bgPick.value, color: colorPick.value, scope: scopeSel.value };
-    };
-    saveBtn.onclick = () => { const rule = collect(); if (typeof this.onSave === 'function') this.onSave(rule); this.close(); };
-    if (this.initialRule && Array.isArray(this.initialRule.conditions)) {
-      nameInput.value = this.initialRule.name || '';
-      logicSel.value = (this.initialRule.logic || 'AND').toUpperCase();
-      bgPick.value = this.initialRule.bg || bgPick.value;
-      colorPick.value = this.initialRule.color || colorPick.value;
-      scopeSel.value = this.initialRule.scope || 'cell';
-      this.initialRule.conditions.forEach(c => addRow({ type: c.type || 'text', operator: c.operator || c.op, value: c.value, value2: c.value2, caseSensitive: c.caseSensitive, logic: c.logic }));
-      this.rows.forEach((r, i) => { r.logicSel.style.display = i === this.rows.length - 1 ? 'none' : ''; });
-    } else { addRow(); }
+    
+    try {
+      this.modalEl.style.maxWidth = '900px';
+      this.modalEl.style.width = '900px';
+      this.modalEl.style.padding = '25px';
+    } catch (e) {}
+
+    const header = contentEl.createEl('div');
+    header.style.display = 'flex';
+    header.style.alignItems = 'center';
+    header.style.justifyContent = 'space-between';
+    header.style.marginBottom = '0px';
+    header.style.paddingBottom = '16px';
+    header.style.borderBottom = '1px solid var(--divider-color)';
+
+    const title = header.createEl('h2', { text: 'Color Table Cells' });
+    title.style.margin = '0';
+    title.style.fontSize = '1.5em';
+    title.style.fontWeight = '600';
+
+    const link = header.createEl('a', { text: 'View on GitHub' });
+    link.href = 'https://github.com/Kazi-Aidah/color-table-cells/releases';
+    link.target = '_blank';
+    link.style.fontSize = '0.9em';
+    link.style.opacity = '0.8';
+    link.style.transition = 'opacity 0.2s';
+    link.addEventListener('mouseenter', () => link.style.opacity = '1');
+    link.addEventListener('mouseleave', () => link.style.opacity = '0.8');
+
+    const body = contentEl.createDiv();
+    body.style.maxHeight = '70vh';
+    body.style.overflow = 'auto';
+
+    const loading = body.createEl('div', { text: 'Loading release notes...' });
+    loading.style.opacity = '0.7';
+    loading.style.fontSize = '0.95em';
+    loading.style.marginTop = '6px';
+
+    // Fetch release notes from GitHub
+    fetch('https://api.github.com/repos/Kazi-Aidah/color-table-cells/releases/latest')
+      .then(response => response.json())
+      .then(data => {
+        body.empty();
+        
+        if (data.message === 'Not Found' || !data) {
+          body.createEl('div', { text: 'No release information available.' });
+          return;
+        }
+
+        const releaseName = body.createEl('div', { text: data.name || data.tag_name || 'Release' });
+        releaseName.style.fontSize = '2em';
+        releaseName.style.fontWeight = '900';
+        releaseName.style.marginTop = '12px';
+        releaseName.style.marginBottom = '12px';
+        releaseName.style.color = 'var(--text-normal)';
+
+        if (data.published_at) {
+          const publishedDate = new Date(data.published_at);
+          const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+          const formattedDate = `${publishedDate.getFullYear()} ${monthNames[publishedDate.getMonth()]} ${String(publishedDate.getDate()).padStart(2, '0')}`;
+          const date = body.createEl('p', { text: `Released: ${formattedDate}` });
+          date.style.color = 'var(--text-muted)';
+          date.style.marginTop = '4px';
+          date.style.marginBottom = '20px';
+        }
+
+        const notes = body.createEl('div');
+        notes.style.marginTop = '16px';
+        notes.style.lineHeight = '1.6';
+        notes.style.fontSize = '0.95em';
+        notes.addClass('markdown-preview-view');
+
+        const md = data.body || 'No notes';
+        try {
+          const { MarkdownRenderer } = require('obsidian');
+          const comp = new require('obsidian').Component();
+          MarkdownRenderer.render(this.app, md, notes, '', comp);
+        } catch (e) {
+          notes.innerHTML = md.replace(/\n/g, '<br>');
+        }
+      })
+      .catch(error => {
+        body.empty();
+        body.createEl('div', { text: 'Failed to load release notes.' });
+        console.error('Error fetching release notes:', error);
+      });
   }
-  onClose() { this.contentEl.empty(); }
+
+  onClose() {
+    this.contentEl.empty();
+  }
 }
 
-// Settings Tab
 class ColorTableSettingTab extends PluginSettingTab {
 
   constructor(app, plugin) {
@@ -1804,7 +2554,15 @@ class ColorTableSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-  new Setting(containerEl).setName("Table Cell Color Settings").setHeading();
+    new Setting(containerEl).setName("Color Table Cells Settings").setHeading();
+    
+    new Setting(containerEl)
+      .setName('Latest Release Notes')
+      .setDesc('View the most recent plugin release notes')
+      .addButton(btn => btn
+        .setButtonText('Open Changelog')
+        .onClick(() => new ReleaseNotesModal(this.app).open())
+      );
 
     // Toggle for Live Preview Table Coloring
     new Setting(containerEl)
@@ -1846,519 +2604,521 @@ class ColorTableSettingTab extends PluginSettingTab {
                 await this.plugin.saveSettings();
               }));
 
+
+
+    // Performance settings
     new Setting(containerEl)
-      .setName("Default Background Color")
-      .addColorPicker(picker =>
-        picker.setValue(this.plugin.settings.defaultBgColor)
+      .setName("Process all cells on open")
+      .setDesc("Process ALL table cells when a file opens, not just visible ones. May improve color consistency in long tables but can impact performance.")
+      .addToggle(toggle =>
+        toggle.setValue(this.plugin.settings.processAllCellsOnOpen)
               .onChange(async val => {
-                this.plugin.settings.defaultBgColor = val;
+                this.plugin.settings.processAllCellsOnOpen = val;
                 await this.plugin.saveSettings();
               }));
 
-    new Setting(containerEl)
-      .setName("Default Text Color")
-      .addColorPicker(picker =>
-        picker.setValue(this.plugin.settings.defaultTextColor)
-              .onChange(async val => {
-                this.plugin.settings.defaultTextColor = val;
-                await this.plugin.saveSettings();
-              }));
-
-    
-
-  // Rule-based coloring
-  new Setting(containerEl).setName("Rule-based Cell Coloring").setHeading();
-    new Setting(containerEl).setDesc("Match text or regex to color cells");
-
-    // Add new rule input + color pickers + button
-    const ruleDiv = containerEl.createDiv({ cls: "rule-input pretty-flex" });
-    const input = ruleDiv.createEl("input", { type: "text", placeholder: "Text or Pattern to match" });
-    
-    // Regex presets dropdown
-    const regexPresets = [
-      { name: "Email", pattern: "\\b[\\w._%+-]+@[\\w.-]+\\.[A-Z]{2,}\\b" },
-      { name: "URL", pattern: "https?:\\/\\/[^\\s]+" },
-      { name: "Phone", pattern: "\\b\\d{3}[-.]?\\d{3}[-.]?\\d{4}\\b" },
-      { name: "Number", pattern: "\\b\\d+\\b" },
-      { name: "Currency", pattern: "\\$\\d+(?:\\.\\d{2})?" },
-      { name: "Date", pattern: "\\b\\d{1,2}\\/\\d{1,2}\\/\\d{4}\\b" },
-      { name: "IP Address", pattern: "\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b" }
-    ];
-    
-    const presetSelect = ruleDiv.createEl("select", { cls: "regex-preset" });
-    presetSelect.style.width = "120px";
-    presetSelect.createEl("option", { text: "Presets...", value: "" });
-    regexPresets.forEach(preset => {
-      presetSelect.createEl("option", { text: preset.name, value: preset.pattern });
-    });
-    presetSelect.onchange = (e) => {
-      if (e.target.value) {
-        input.value = e.target.value;
-        regexToggle.checked = true;
-        presetSelect.value = "";
-      }
-    };
-    
-    // Regex toggle
-    const regexToggle = ruleDiv.createEl("input", { type: "checkbox", cls: "regex-toggle" });
-    regexToggle.title = "Use regex pattern";
-    regexToggle.style.width = "20px";
-    regexToggle.style.marginLeft = "4px";
-    
-    // Case sensitive toggle
-    const caseToggle = ruleDiv.createEl("input", { type: "checkbox", cls: "case-toggle" });
-    caseToggle.title = "Case sensitive";
-    caseToggle.style.width = "20px";
-    caseToggle.style.marginLeft = "8px";
-    
-    // Color pickers beside new rule btn
-    const addRuleColorInput = ruleDiv.createEl("input", { type: "color", cls: "add-rule-color-picker" });
-    addRuleColorInput.value = this.plugin.settings.defaultTextColor;
-    addRuleColorInput.title = "Text Color";
-    const addRuleBgInput = ruleDiv.createEl("input", { type: "color", cls: "add-rule-bg-picker" });
-    addRuleBgInput.value = this.plugin.settings.defaultBgColor;
-    addRuleBgInput.title = "Background Color";
+    // Quick Actions Section
+    containerEl.createEl('h2', { text: 'Quick Actions' });
   
-  // Add Rule button
-  const addBtn = ruleDiv.createEl('button', { cls: 'add-btn add-rule-btn', attr: { 'aria-label': 'Add Rule' } });
-  addBtn.textContent = 'Add Rule';
-  addBtn.onclick = async () => {
-      const val = input.value.trim();
-      if (!val) return;
-      if (!this.plugin.settings) this.plugin.settings = { defaultBgColor: "#331717", defaultTextColor: "#ffb2b2", enableContextMenu: true, rules: [], numericRules: [] };
-      if (!Array.isArray(this.plugin.settings.rules)) this.plugin.settings.rules = [];
-      const newRule = { 
-        match: val, 
-        bg: addRuleBgInput.value, 
-        color: addRuleColorInput.value,
-        regex: regexToggle.checked,
-        caseSensitive: caseToggle.checked
-      };
-      this.plugin.settings.rules.push(newRule);
-      await this.plugin.saveSettings();
-      input.value = "";
-      regexToggle.checked = false;
-      caseToggle.checked = false;
-      presetSelect.value = "";
-      this.display();
-    };
-    if (this.plugin.settings.rules?.length) {
-      const rulesList = containerEl.createDiv({ cls: 'rules-list' });
-      this.plugin.settings.rules.forEach((rule, i) => {
-        const ruleSetting = new Setting(rulesList)
-          .setName(rule.match)
-          .addColorPicker(picker => picker.setValue(rule.color).onChange(async val => { rule.color = val; await this.plugin.saveDataSettings(); }))
-          .addColorPicker(picker => picker.setValue(rule.bg).onChange(async val => { rule.bg = val; await this.plugin.saveDataSettings(); }));
-        const nameEl = ruleSetting.nameEl;
-        nameEl.empty();
-        const dragHandle = nameEl.createEl('span', { cls: 'drag-handle' });
-        dragHandle.title = 'Drag to reorder';
-        if (typeof window.setIcon === 'function') {
-          window.setIcon(dragHandle, 'grip-vertical');
-        } else if (typeof setIcon === 'function') {
-          setIcon(dragHandle, 'grip-vertical');
-        } else {
-          dragHandle.textContent = '≡';
-        }
-        
-        // Display pattern with regex badge if applicable
-        const patternContainer = nameEl.createDiv({ cls: 'rule-pattern-container' });
-        const matchSpan = patternContainer.createEl('span', { text: rule.match, cls: 'rule-match' });
-        matchSpan.style.cursor = 'pointer';
-        matchSpan.title = 'Click to edit rule';
-        
-        // Add regex badge if rule uses regex
-        if (rule.regex) {
-          const regexBadge = patternContainer.createEl('span', { text: '.*', cls: 'regex-badge' });
-          regexBadge.title = 'Regex pattern';
-          regexBadge.style.marginLeft = '6px';
-          regexBadge.style.fontSize = '0.75em';
-          regexBadge.style.padding = '2px 4px';
-          regexBadge.style.borderRadius = '3px';
-          regexBadge.style.backgroundColor = 'var(--color-accent, #6366f1)';
-          regexBadge.style.color = 'white';
-          regexBadge.style.display = 'inline-block';
-        }
-        
-        // Add case-sensitive badge if applicable
-        if (rule.caseSensitive) {
-          const caseBadge = patternContainer.createEl('span', { text: 'Aa', cls: 'case-badge' });
-          caseBadge.title = 'Case sensitive';
-          caseBadge.style.marginLeft = '6px';
-          caseBadge.style.fontSize = '0.75em';
-          caseBadge.style.padding = '2px 4px';
-          caseBadge.style.borderRadius = '3px';
-          caseBadge.style.backgroundColor = 'var(--background-modifier-border)';
-          caseBadge.style.display = 'inline-block';
-        }
-        
-        const startEditing = async () => {
-          const editInput = nameEl.createEl('input', { type: 'text' });
-          editInput.value = rule.match;
-          patternContainer.style.display = 'none';
-          const finish = async (save) => {
-            const newVal = editInput.value.trim();
-            if (save && newVal) {
-              rule.match = newVal;
+  new Setting(containerEl)
+    .setName("Show Row Coloring in Right-Click Menu")
+    .setDesc("Display 'Color Row' and 'Remove Row' options in the context menu for table cells")
+    .addToggle(toggle =>
+      toggle.setValue(this.plugin.settings.showColorRowInMenu)
+            .onChange(async val => {
+              this.plugin.settings.showColorRowInMenu = val;
               await this.plugin.saveSettings();
-            }
-            editInput.remove();
-            patternContainer.style.display = '';
-          };
-          editInput.addEventListener('blur', () => finish(true));
-          editInput.addEventListener('keydown', async (e) => {
-            if (e.key === 'Enter') {
-              await finish(true);
-            } else if (e.key === 'Escape') {
-              await finish(false);
-            }
-          });
-          editInput.focus();
-          editInput.select();
-        };
-        matchSpan.addEventListener('click', startEditing);
-        
-        // Add regex and case-sensitive toggles to control panel
-        const controlsPanel = ruleSetting.controlEl.createDiv({ cls: 'rule-toggles' });
-        controlsPanel.style.marginRight = '12px';
-        
-        const regexCheckbox = controlsPanel.createEl('input', { type: 'checkbox', cls: 'rule-regex-checkbox' });
-        regexCheckbox.checked = rule.regex || false;
-        regexCheckbox.title = 'Use regex pattern';
-        regexCheckbox.style.width = '18px';
-        regexCheckbox.style.cursor = 'pointer';
-        regexCheckbox.onchange = async (e) => {
-          rule.regex = e.target.checked;
-          await this.plugin.saveSettings();
-          this.display();
-        };
-        
-        const caseCheckbox = controlsPanel.createEl('input', { type: 'checkbox', cls: 'rule-case-checkbox' });
-        caseCheckbox.checked = rule.caseSensitive || false;
-        caseCheckbox.title = 'Case sensitive';
-        caseCheckbox.style.width = '18px';
-        caseCheckbox.style.marginLeft = '8px';
-        caseCheckbox.style.cursor = 'pointer';
-        caseCheckbox.onchange = async (e) => {
-          rule.caseSensitive = e.target.checked;
-          await this.plugin.saveSettings();
-          this.display();
-        };
-        const rootEl = ruleSetting.settingEl;
-        rootEl.dataset.ruleIndex = String(i);
-        dragHandle.setAttribute('draggable', 'true');
-        dragHandle.addEventListener('dragstart', (e) => {
-          e.dataTransfer.setData('text/plain', String(i));
-          rootEl.classList.add('dragging');
-          if (e.dataTransfer.setDragImage) {
-            e.dataTransfer.setDragImage(dragHandle, 8, 8);
-          }
-        });
-        dragHandle.addEventListener('dragend', () => {
-          rootEl.classList.remove('dragging');
-          document.querySelectorAll('.rule-over').forEach(el => el.classList.remove('rule-over'));
-        });
-        rootEl.addEventListener('dragover', (e) => {
-          e.preventDefault();
-          rootEl.classList.add('rule-over');
-        });
-        rootEl.addEventListener('dragleave', () => {
-          rootEl.classList.remove('rule-over');
-        });
-        rootEl.addEventListener('drop', async (e) => {
-          e.preventDefault();
-          const fromIndex = Number(e.dataTransfer.getData('text/plain'));
-          const toIndex = Number(rootEl.dataset.ruleIndex);
-          if (isNaN(fromIndex) || isNaN(toIndex) || fromIndex === toIndex) return;
-          const rules = this.plugin.settings.rules;
-          const [moved] = rules.splice(fromIndex, 1);
-          rules.splice(toIndex, 0, moved);
-          await this.plugin.saveDataSettings();
-          this.display();
-        });
-        const controls = ruleSetting.controlEl.createDiv({ cls: 'rule-controls' });
-        const delButton = new ButtonComponent(controls);
-        delButton.setIcon('trash-2');
-        delButton.setTooltip('Delete rule');
-        delButton.buttonEl.classList.add('rule-delete-btn');
-        delButton.onClick(async () => {
-          this.plugin.settings.rules.splice(i, 1);
-          await this.plugin.saveSettings();
-          this.display();
-        });
-      });
-    }
+            }));
 
-  // --- Numerical Rules Section ---
-  new Setting(containerEl).setName("Numerical Rules").setHeading();
-  new Setting(containerEl).setDesc("Apply colors based on numeric thresholds");
-  const numRuleDiv = containerEl.createDiv({ cls: "num-rule-input pretty-flex num-rule-row" });
-    // Operator select
-    const opSelect = numRuleDiv.createEl("select", { cls: "num-op-select" });
-    const opOptions = [
-      { label: "<", value: "lt" },
-      { label: "≤", value: "le" },
-      { label: "=", value: "eq" },
-      { label: "≥", value: "ge" },
-      { label: ">", value: "gt" }
+  new Setting(containerEl)
+    .setName("Show Column Coloring in Right-Click Menu")
+    .setDesc("Display 'Color Column' and 'Remove Column' options in the context menu for table cells")
+    .addToggle(toggle =>
+      toggle.setValue(this.plugin.settings.showColorColumnInMenu)
+            .onChange(async val => {
+              this.plugin.settings.showColorColumnInMenu = val;
+              await this.plugin.saveSettings();
+            }));
+
+  new Setting(containerEl)
+    .setName("Show Undo/Redo in Right-Click Menu")
+    .setDesc("Display 'Undo' and 'Redo' color changes in the context menu")
+    .addToggle(toggle =>
+      toggle.setValue(this.plugin.settings.showUndoRedoInMenu)
+            .onChange(async val => {
+              this.plugin.settings.showUndoRedoInMenu = val;
+              await this.plugin.saveSettings();
+            }));
+
+
+    // Coloring Rules
+    containerEl.createEl('h3', { text: 'Coloring Rules' });
+    const crSection = containerEl.createDiv({ cls: 'cr-section' });
+
+    // Search bar
+    const searchContainer = crSection.createDiv({ cls: 'ctc-search-container pretty-flex' });
+    const searchInput = searchContainer.createEl('input', { type: 'text', cls: 'ctc-search-input', placeholder: 'Search rules...' });
+    searchContainer.createDiv({ cls: 'ctc-search-icon' });
+    let searchTerm = '';
+    searchInput.addEventListener('input', () => { searchTerm = searchInput.value.toLowerCase(); renderRules(); });
+
+    const header = crSection.createDiv({ cls: 'cr-header-row cr-disabled-row pretty-flex' });
+    try { header.classList.add('cr-sticky'); } catch (e) {}
+    const mkHeaderSel = (text) => {
+      const s = header.createEl('select', { cls: 'cr-select cr-header-select' });
+      const o = s.createEl('option', { text, value: '' });
+      o.selected = true; o.disabled = true;
+      s.disabled = true;
+      return s;
+    };
+    mkHeaderSel('TARGET');
+    mkHeaderSel('WHEN');
+    mkHeaderSel('MATCH');
+    mkHeaderSel('VALUE');
+    header.createEl('span', { text: '', cls: 'cr-color-placeholder' });
+    header.createEl('span', { text: '', cls: 'cr-bg-placeholder' });
+    header.createEl('span', { text: '', cls: 'cr-x-placeholder' });
+
+    const rulesContainer = crSection.createDiv({ cls: 'cr-rules-container' });
+
+    const TARGET_OPTIONS = [
+      { label: 'COLOR CELL', value: 'cell' },
+      { label: 'COLOR ROW', value: 'row' },
+      { label: 'COLOR COLUMN', value: 'column' },
     ];
-    opOptions.forEach(opt => {
-      const o = opSelect.createEl("option");
-      o.value = opt.value;
-      o.text = opt.label;
-    });
-    // Value input
-    const numInput = numRuleDiv.createEl("input", { type: "number", placeholder: "Value", cls: "num-value-input" });
-    // Color pickers
-    const colorInput = numRuleDiv.createEl("input", { type: "color", cls: "num-color-picker" });
-    colorInput.value = this.plugin.settings.defaultTextColor;
-    colorInput.title = "Text Color";
-    const bgInput = numRuleDiv.createEl("input", { type: "color", cls: "num-bg-picker" });
-    bgInput.value = this.plugin.settings.defaultBgColor;
-    bgInput.title = "Background Color";
-  // Add Numeric Rule button
-  const addNumBtn = numRuleDiv.createEl('button', { cls: 'add-btn add-rule-btn', attr: { 'aria-label': 'Add Numeric Rule' } });
-  addNumBtn.textContent = 'Add Rule';
-  addNumBtn.onclick = async () => {
-      const op = opSelect.value;
-      const val = parseFloat(numInput.value);
-      if (!op || isNaN(val)) return;
-      if (!this.plugin.settings.numericRules) this.plugin.settings.numericRules = [];
-      this.plugin.settings.numericRules.push({ op, value: val, color: colorInput.value, bg: bgInput.value });
-      await this.plugin.saveSettings();
-      numInput.value = "";
-      this.display();
-    };
+    const WHEN_OPTIONS = [
+      { label: 'THE CELL', value: 'theCell' },
+      { label: 'ANY CELL', value: 'anyCell' },
+      { label: 'ALL CELL', value: 'allCell' },
+      { label: 'NO CELL', value: 'noCell' },
+      { label: 'FIRST ROW', value: 'firstRow' },
+      { label: 'COLUMN HEADER', value: 'columnHeader' },
+    ];
+    const MATCH_OPTIONS = [
+      { label: 'IS', value: 'is' },
+      { label: 'IS NOT', value: 'isNot' },
+      { label: 'IS REGEX', value: 'isRegex' },
+      { label: 'CONTAINS', value: 'contains' },
+      { label: 'DOES NOT CONTAIN', value: 'notContains' },
+      { label: 'STARTS WITH', value: 'startsWith' },
+      { label: 'ENDS WITH', value: 'endsWith' },
+      { label: 'DOES NOT START WITH', value: 'notStartsWith' },
+      { label: 'DOES NOT END WITH', value: 'notEndsWith' },
+      { label: 'IS EMPTY', value: 'isEmpty' },
+      { label: 'IS NOT EMPTY', value: 'isNotEmpty' },
+      { label: 'IS EQUAL TO', value: 'eq' },
+      { label: 'IS GREATER THAN', value: 'gt' },
+      { label: 'IS LESS THAN', value: 'lt' },
+      { label: 'IS GREATER THAN & EQUAL TO', value: 'ge' },
+      { label: 'IS LESS THAN & EQUAL TO', value: 'le' },
+    ];
 
-    // --- Numerical Rules List ---
-    if (this.plugin.settings.numericRules?.length) {
-      const numRulesList = containerEl.createDiv({ cls: 'num-rules-list' });
-      this.plugin.settings.numericRules.forEach((nRule, i) => {
-        const nRuleSetting = new Setting(numRulesList);
-        // Drag handle
-        const nameEl = nRuleSetting.nameEl;
-        nameEl.empty();
-        const dragHandle = nameEl.createEl('span', { cls: 'drag-handle' });
-        dragHandle.title = 'Drag to reorder';
+    const labelFor = (opts, val) => (opts.find(o => o.value === val)?.label || '').toLowerCase();
+    const isRegexRule = (rule) => rule.match === 'isRegex';
+    const isNumericRule = (rule) => ['eq','gt','lt','ge','le'].includes(rule.match);
+
+    const renderRules = () => {
+      rulesContainer.empty();
+      let rules = Array.isArray(this.plugin.settings.coloringRules) ? [...this.plugin.settings.coloringRules] : [];
+      // Filter
+      if (searchTerm) {
+        rules = rules.filter(r => {
+          const blob = [
+            labelFor(TARGET_OPTIONS, r.target || ''),
+            labelFor(WHEN_OPTIONS, r.when || ''),
+            labelFor(MATCH_OPTIONS, r.match || ''),
+            r.value != null ? String(r.value) : ''
+          ].join(' ').toLowerCase();
+          return blob.includes(searchTerm);
+        });
+      }
+      // Sort
+      const sortMode = this.plugin.settings.coloringSort || 'lastAdded';
+      if (sortMode === 'az') {
+        rules.sort((a,b) => (labelFor(MATCH_OPTIONS, a.match||'')).localeCompare(labelFor(MATCH_OPTIONS, b.match||'')));
+      } else if (sortMode === 'regexFirst') {
+        rules.sort((a,b) => Number(isRegexRule(b)) - Number(isRegexRule(a)));
+      } else if (sortMode === 'numbersFirst') {
+        rules.sort((a,b) => Number(isNumericRule(b)) - Number(isNumericRule(a)));
+      } else if (sortMode === 'mode') {
+        const order = { cell:0, row:1, column:2 };
+        rules.sort((a,b) => (order[a.target||'cell'] - order[b.target||'cell']));
+      }
+      rules.forEach((rule, idx) => {
+        const row = rulesContainer.createDiv({ cls: 'cr-rule-row pretty-flex' });
+
+        const targetSel = row.createEl('select', { cls: 'cr-select' });
+        const tPh = targetSel.createEl('option', { text: 'TARGET', value: '' }); tPh.disabled = true; tPh.selected = !rule.target;
+        TARGET_OPTIONS.forEach(opt => { const o = targetSel.createEl('option'); o.value = opt.value; o.text = opt.label; if (rule.target === opt.value) o.selected = true; });
+        targetSel.addEventListener('change', async () => { rule.target = targetSel.value; await this.plugin.saveSettings(); });
+
+        const whenSel = row.createEl('select', { cls: 'cr-select' });
+        const wPh = whenSel.createEl('option', { text: 'WHEN', value: '' }); wPh.disabled = true; wPh.selected = !rule.when;
+        WHEN_OPTIONS.forEach(opt => { const o = whenSel.createEl('option'); o.value = opt.value; o.text = opt.label; if (rule.when === opt.value) o.selected = true; });
+        whenSel.addEventListener('change', async () => { rule.when = whenSel.value; await this.plugin.saveSettings(); });
+
+        const matchSel = row.createEl('select', { cls: 'cr-select' });
+        const mPh = matchSel.createEl('option', { text: 'MATCH', value: '' }); mPh.disabled = true; mPh.selected = !rule.match;
+        MATCH_OPTIONS.forEach(opt => { const o = matchSel.createEl('option'); o.value = opt.value; o.text = opt.label; if (rule.match === opt.value) o.selected = true; });
+        matchSel.addEventListener('change', async () => { rule.match = matchSel.value; await this.plugin.saveSettings(); renderRules(); });
+
+        const numericMatches = new Set(['eq','gt','lt','ge','le']);
+        const valueInput = row.createEl('input', { type: numericMatches.has(rule.match) ? 'number' : 'text', cls: 'cr-value-input' });
+        valueInput.placeholder = 'VALUE';
+        if (rule.value != null) valueInput.value = String(rule.value);
+        valueInput.addEventListener('change', async () => {
+          const v = valueInput.value;
+          rule.value = numericMatches.has(rule.match) ? (v === '' ? null : Number(v)) : v;
+          await this.plugin.saveSettings();
+        });
+
+        const colorPicker = row.createEl('input', { type: 'color', cls: 'cr-color-picker' });
+        if (rule.color) colorPicker.value = rule.color; else colorPicker.value = '#000000';
+        colorPicker.title = 'Text Color';
+        colorPicker.addEventListener('change', async () => { rule.color = colorPicker.value; await this.plugin.saveSettings(); });
+
+        const bgPicker = row.createEl('input', { type: 'color', cls: 'cr-bg-picker' });
+        if (rule.bg) bgPicker.value = rule.bg; else bgPicker.value = '#000000';
+        bgPicker.title = 'Background Color';
+        bgPicker.addEventListener('change', async () => { rule.bg = bgPicker.value; await this.plugin.saveSettings(); });
+
+        const delBtn = row.createEl('button', { cls: 'mod-ghost cr-del-btn' });
         if (typeof window.setIcon === 'function') {
-          window.setIcon(dragHandle, 'grip-vertical');
+          window.setIcon(delBtn, 'x');
         } else if (typeof setIcon === 'function') {
-          setIcon(dragHandle, 'grip-vertical');
+          setIcon(delBtn, 'x');
         } else {
-          dragHandle.textContent = '≡';
+          delBtn.textContent = '×';
         }
-        // Editable rule label
-        const opMap = { lt: '<', le: '≤', eq: '=', ge: '≥', gt: '>' };
-        const ruleLabel = nameEl.createEl('span', { text: `${opMap[nRule.op]} ${nRule.value}`, cls: 'num-rule-label' });
-        ruleLabel.style.cursor = 'pointer';
-        ruleLabel.title = 'Click to edit rule';
-        const startEditing = () => {
-          ruleLabel.style.display = 'none';
-          const editDiv = nameEl.createDiv({ cls: 'num-edit-row pretty-flex' });
-          const opEdit = editDiv.createEl('select', { cls: 'num-op-select' });
-          opOptions.forEach(opt => {
-            const o = opEdit.createEl('option');
-            o.value = opt.value;
-            o.text = opt.label;
-            if (opt.value === nRule.op) o.selected = true;
-          });
-          const valEdit = editDiv.createEl('input', { type: 'number', value: nRule.value, cls: 'num-value-input' });
-          valEdit.style.width = '70px';
-          const saveEdit = () => {
-            nRule.op = opEdit.value;
-            nRule.value = parseFloat(valEdit.value);
-            this.plugin.saveSettings();
-            editDiv.remove();
-            ruleLabel.textContent = `${opMap[nRule.op]} ${nRule.value}`;
-            ruleLabel.style.display = '';
-          };
-          valEdit.addEventListener('keydown', e => { if (e.key === 'Enter') saveEdit(); });
-          opEdit.addEventListener('change', saveEdit);
-          valEdit.addEventListener('blur', saveEdit);
-        };
-        ruleLabel.addEventListener('click', startEditing);
-        nRuleSetting.addColorPicker(picker => picker.setValue(nRule.color).onChange(async val => { nRule.color = val; await this.plugin.saveDataSettings(); }))
-          .addColorPicker(picker => picker.setValue(nRule.bg).onChange(async val => { nRule.bg = val; await this.plugin.saveDataSettings(); }));
-        const rootEl = nRuleSetting.settingEl;
-        rootEl.dataset.numRuleIndex = String(i);
-        dragHandle.setAttribute('draggable', 'true');
-        dragHandle.addEventListener('dragstart', (e) => {
-          e.dataTransfer.setData('text/plain', String(i));
-          rootEl.classList.add('dragging');
-          if (e.dataTransfer.setDragImage) {
-            e.dataTransfer.setDragImage(dragHandle, 8, 8);
-          }
-        });
-        dragHandle.addEventListener('dragend', () => {
-          rootEl.classList.remove('dragging');
-          document.querySelectorAll('.num-rule-over').forEach(el => el.classList.remove('num-rule-over'));
-        });
-        rootEl.addEventListener('dragover', (e) => {
-          e.preventDefault();
-          rootEl.classList.add('num-rule-over');
-        });
-        rootEl.addEventListener('dragleave', () => {
-          rootEl.classList.remove('num-rule-over');
-        });
-        rootEl.addEventListener('drop', async (e) => {
-          e.preventDefault();
-          const fromIndex = Number(e.dataTransfer.getData('text/plain'));
-          const toIndex = Number(rootEl.dataset.numRuleIndex);
-          if (isNaN(fromIndex) || isNaN(toIndex) || fromIndex === toIndex) return;
-          const rules = this.plugin.settings.numericRules;
-          const [moved] = rules.splice(fromIndex, 1);
-          rules.splice(toIndex, 0, moved);
-          await this.plugin.saveDataSettings();
-          this.display();
-        });
-        const controls = nRuleSetting.controlEl.createDiv({ cls: 'rule-controls' });
-        const delButton = new ButtonComponent(controls);
-        delButton.setIcon('trash-2');
-        delButton.setTooltip('Delete rule');
-        delButton.buttonEl.classList.add('rule-delete-btn');
-        delButton.onClick(async () => {
-          this.plugin.settings.numericRules.splice(i, 1);
+        delBtn.addEventListener('click', async () => {
+          this.plugin.settings.coloringRules.splice(idx, 1);
           await this.plugin.saveSettings();
-          this.display();
+          renderRules();
         });
       });
-    }
-
-    new Setting(containerEl).setName("Advanced Rules (AND/OR)").setHeading();
-    new Setting(containerEl).setDesc("Combine multiple conditions to apply colors");
-    const advActions = containerEl.createDiv({ cls: 'pretty-flex' });
-    const addAdvBtn = advActions.createEl('button', { cls: 'mod-cta' });
-    addAdvBtn.textContent = 'Add Advanced Rule';
-    addAdvBtn.onclick = () => {
-      const modal = new AdvancedRuleModal(this.app, this.plugin, null);
-      modal.onSave = async (rule) => {
-        if (!Array.isArray(this.plugin.settings.advancedRules)) this.plugin.settings.advancedRules = [];
-        this.plugin.settings.advancedRules.push(rule);
-        await this.plugin.saveSettings();
-        this.display();
-      };
-      modal.open();
     };
-    if (Array.isArray(this.plugin.settings.advancedRules) && this.plugin.settings.advancedRules.length) {
-      const advList = containerEl.createDiv({ cls: 'rules-list' });
-      this.plugin.settings.advancedRules.forEach((ar, i) => {
-        const s = new Setting(advList);
-        const nameEl = s.nameEl;
-        nameEl.empty();
-        const logic = (ar.logic || 'AND').toUpperCase();
-        const summary = Array.isArray(ar.conditions) ? ar.conditions.map(c => {
-          const t = (c.type||'text');
-          const op = c.operator || c.op || '';
-          if (t === 'numeric') return `${op} ${c.value}${op==='between'&&c.value2!=null?`–${c.value2}`:''}`;
-          if (t === 'date') return `${op} ${c.value}${op==='between'&&c.value2?`–${c.value2}`:''}`;
-          if (t === 'regex') return `/${c.match||c.value||''}/`;
-          if (t === 'empty') return `empty`;
-          return `${op || 'contains'} ${c.match || c.value || ''}`;
-        }).join(` ${logic} `) : '';
-        nameEl.createEl('span', { text: summary });
-        s.addColorPicker(p => p.setValue(ar.color || '').onChange(async val => { ar.color = val; await this.plugin.saveDataSettings(); }))
-         .addColorPicker(p => p.setValue(ar.bg || '').onChange(async val => { ar.bg = val; await this.plugin.saveDataSettings(); }));
-        const controls = s.controlEl.createDiv({ cls: 'rule-controls' });
-        const editButton = new ButtonComponent(controls);
-        editButton.setIcon('pencil');
-        editButton.setTooltip('Edit rule');
-        editButton.onClick(() => {
-          const modal = new AdvancedRuleModal(this.app, this.plugin, ar);
-          modal.onSave = async (rule) => { this.plugin.settings.advancedRules[i] = rule; await this.plugin.saveSettings(); this.display(); };
-          modal.open();
+
+    const addRow = crSection.createDiv({ cls: 'cr-add-row' });
+    const sortSel = addRow.createEl('select', { cls: 'cr-select' });
+    const sortOptions = [
+      { label: 'Sort: Last Added', value: 'lastAdded' },
+      { label: 'Sort: A-Z', value: 'az' },
+      { label: 'Sort: Regex first', value: 'regexFirst' },
+      { label: 'Sort: Numbers first', value: 'numbersFirst' },
+      { label: 'Sort: Mode', value: 'mode' }
+    ];
+    sortOptions.forEach(opt => { const o = sortSel.createEl('option'); o.text = opt.label; o.value = opt.value; if (opt.value === (this.plugin.settings.coloringSort||'lastAdded')) o.selected = true; });
+    sortSel.addEventListener('change', async () => { this.plugin.settings.coloringSort = sortSel.value; await this.plugin.saveSettings(); renderRules(); });
+
+    const addBtn = addRow.createEl('button', { cls: 'mod-cta cr-add-flex' });
+    addBtn.textContent = '+ Add Rule';
+    addBtn.addEventListener('click', async () => {
+      if (!Array.isArray(this.plugin.settings.coloringRules)) this.plugin.settings.coloringRules = [];
+      this.plugin.settings.coloringRules.push({ target: '', when: '', match: '', value: null, color: null, bg: null });
+      await this.plugin.saveSettings();
+      renderRules();
+    });
+
+    renderRules();
+
+    const advHeading = containerEl.createEl('h3', { text: 'Advanced Rules', cls: 'cr-adv-heading' });
+    
+    // Search bar for advanced rules
+    const advSearchContainer = containerEl.createDiv({ cls: 'ctc-search-container pretty-flex' });
+    const advSearchInput = advSearchContainer.createEl('input', { type: 'text', cls: 'ctc-search-input', placeholder: 'Search advanced rules...' });
+    advSearchContainer.createDiv({ cls: 'ctc-search-icon' });
+    let advSearchTerm = '';
+    advSearchInput.addEventListener('input', () => { advSearchTerm = advSearchInput.value.toLowerCase(); renderAdv(); });
+    
+    const advList = containerEl.createDiv({ cls: 'cr-adv-list' });
+    const renderAdv = () => {
+      advList.empty();
+      let advRules = Array.isArray(this.plugin.settings.advancedRules) ? this.plugin.settings.advancedRules : [];
+      
+      const cap = (s) => (typeof s === 'string' && s.length) ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+      const verb = (m, v) => {
+        if (m === 'contains') return `contains ${v}`;
+        if (m === 'notContains') return `does not contain ${v}`;
+        if (m === 'is') return `is ${v}`;
+        if (m === 'isNot') return `is not ${v}`;
+        if (m === 'startsWith') return `starts with ${v}`;
+        if (m === 'endsWith') return `ends with ${v}`;
+        if (m === 'notStartsWith') return `does not start with ${v}`;
+        if (m === 'notEndsWith') return `does not end with ${v}`;
+        if (m === 'isEmpty') return `is empty`;
+        if (m === 'isNotEmpty') return `is not empty`;
+        if (m === 'isRegex') return `matches ${v}`;
+        if (m === 'eq') return `is equal to ${v}`;
+        if (m === 'gt') return `is greater than ${v}`;
+        if (m === 'lt') return `is less than ${v}`;
+        if (m === 'ge') return `is greater than or equal to ${v}`;
+        if (m === 'le') return `is less than or equal to ${v}`;
+        return `${m} ${v}`;
+      };
+      const summaryForAdvRule = (ar) => {
+        // Use custom name if provided
+        if (ar.name && ar.name.trim()) {
+          return ar.name;
+        }
+        // Auto-generate name
+        const targetPhrase = ar.target === 'row' ? 'Color rows' : (ar.target === 'column' ? 'Color columns' : 'Color cells');
+        const conds = Array.isArray(ar.conditions) ? ar.conditions : [];
+        if (!conds.length) return '(empty)';
+        
+        // Build a readable string showing conditions
+        const parts = conds.map((c, idx) => {
+          const value = String(c.value || '').trim();
+          // For header conditions, just show the value
+          if (c.when === 'columnHeader') {
+            return value;
+          }
+          // For other conditions, show match + value unless it's a simple case
+          if (c.match === 'is' && value) {
+            return value;
+          }
+          // Otherwise show verb(match, value)
+          return verb(c.match, value);
+        }).filter(Boolean);
+        
+        const condString = parts.length ? parts.join(', ') : 'conditions';
+        
+        return `${targetPhrase} when ${condString}`;
+      };
+      
+      // Filter by search term - search all condition values
+      if (advSearchTerm) {
+        advRules = advRules.filter((ar) => {
+          const summary = summaryForAdvRule(ar).toLowerCase();
+          const targetText = (ar.target || 'cell').toLowerCase();
+          const colorHex = (ar.color || ar.bg || '').toLowerCase();
+          const allCondValues = Array.isArray(ar.conditions) ? ar.conditions.map(c => String(c.value || '').toLowerCase()).join(' ') : '';
+          return summary.includes(advSearchTerm) || targetText.includes(advSearchTerm) || colorHex.includes(advSearchTerm) || allCondValues.includes(advSearchTerm);
         });
-        const dupButton = new ButtonComponent(controls);
-        dupButton.setIcon('copy');
-        dupButton.setTooltip('Duplicate rule');
-        dupButton.onClick(async () => {
-          const copy = JSON.parse(JSON.stringify(ar));
-          this.plugin.settings.advancedRules.splice(i+1, 0, copy);
-          await this.plugin.saveSettings();
-          this.display();
-        });
-        const delButton = new ButtonComponent(controls);
-        delButton.setIcon('trash-2');
-        delButton.setTooltip('Delete rule');
-        delButton.buttonEl.classList.add('rule-delete-btn');
-        delButton.onClick(async () => {
-          this.plugin.settings.advancedRules.splice(i, 1);
-          await this.plugin.saveSettings();
-          this.display();
-        });
+      }
+      advRules.forEach((ar, idx) => {
+        const originalIdx = this.plugin.settings.advancedRules.indexOf(ar);
+        const row = advList.createDiv({ cls: 'cr-adv-row pretty-flex' });
+        const drag = row.createEl('span', { cls: 'drag-handle' });
+        try { require('obsidian').setIcon(drag, 'menu'); } catch (e) { try { require('obsidian').setIcon(drag, 'grip-vertical'); } catch (e2) { drag.textContent = '≡'; } }
+        row.dataset.idx = String(originalIdx);
+        drag.setAttribute('draggable','true');
+        drag.addEventListener('dragstart', (e) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', String(originalIdx)); row.classList.add('dragging'); });
+        drag.addEventListener('dragend', () => { row.classList.remove('dragging'); advList.querySelectorAll('.rule-over').forEach(el => el.classList.remove('rule-over')); });
+        row.addEventListener('dragover', (e) => { e.preventDefault(); row.classList.add('rule-over'); });
+        row.addEventListener('dragleave', () => { row.classList.remove('rule-over'); });
+        row.addEventListener('drop', async (e) => { e.preventDefault(); const from = Number(e.dataTransfer.getData('text/plain')); const to = Number(row.dataset.idx); if (isNaN(from)||isNaN(to)||from===to) return; const list = this.plugin.settings.advancedRules; const [m] = list.splice(from,1); list.splice(to,0,m); await this.plugin.saveSettings(); renderAdv(); });
+
+        const label = row.createEl('span', { cls: 'cr-adv-label' });
+        label.textContent = summaryForAdvRule(ar);
+
+        const settingsBtn = row.createEl('button', { cls: 'mod-ghost cr-adv-settings' });
+        try { require('obsidian').setIcon(settingsBtn, 'settings'); } catch (e) {}
+        settingsBtn.addEventListener('click', () => { new AdvancedRuleModal(this.app, this.plugin, originalIdx).open(); });
       });
-    }
+    };
+    document.addEventListener('ctc-adv-rules-changed', renderAdv);
+    const advActions = containerEl.createDiv({ cls: 'cr-adv-actions' });
+    const addAdvBtn = advActions.createEl('button', { cls: 'mod-cta' });
+    addAdvBtn.textContent = 'Add advanced rule';
+    addAdvBtn.addEventListener('click', async () => { if (!Array.isArray(this.plugin.settings.advancedRules)) this.plugin.settings.advancedRules = []; this.plugin.settings.advancedRules.push({ logic:'any', conditions:[], target:'cell', color:null, bg:null }); await this.plugin.saveSettings(); renderAdv(); });
+    renderAdv();
+    
+    // Export/Import Section
+    containerEl.createEl('h2', { text: 'Data Management' });
+    
+    const exportImportRow = containerEl.createDiv({ cls: 'cr-export-row pretty-flex' });
+    const exportBtn = exportImportRow.createEl('button', { text: 'Export Settings' });
+    exportBtn.addEventListener('click', async () => {
+      try {
+        const data = {
+          settings: this.plugin.settings,
+          cellData: this.plugin.cellData,
+          exportDate: new Date().toISOString()
+        };
+        const dataStr = JSON.stringify(data, null, 2);
+        const blob = new Blob([dataStr], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `color-table-cells-backup-${new Date().getTime()}.json`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+        setTimeout(() => new Notice('Settings exported successfully!'), 500);
+      } catch (e) {
+        new Notice('Failed to export settings: ' + e.message);
+      }
+    });
+    
+    const importBtn = exportImportRow.createEl('button', { text: 'Import Settings' });
+    importBtn.addEventListener('click', () => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.json';
+      input.addEventListener('change', async (e) => {
+        try {
+          const file = e.target.files?.[0];
+          if (!file) return;
+          const text = await file.text();
+          const data = JSON.parse(text);
+          
+          if (data.settings) {
+            this.plugin.settings = Object.assign(this.plugin.settings, data.settings);
+          }
+          if (data.cellData) {
+            this.plugin.cellData = data.cellData;
+          }
+          
+          await this.plugin.saveSettings();
+          this.display();
+          setTimeout(() => new Notice('Settings imported successfully!'), 500);
+        } catch (e) {
+          new Notice('Failed to import settings: ' + e.message);
+        }
+      });
+      input.click();
+    });
   }
 }
 
-// Modal to list rules and apply them to a specific table element
-class RulesModal extends Modal {
-  constructor(app, plugin, tableEl) {
-    super(app);
-    this.plugin = plugin;
-    this.tableEl = tableEl;
-  }
-
+class AdvancedRuleModal extends Modal {
+  constructor(app, plugin, index) { super(app); this.plugin = plugin; this.index = index; }
   onOpen() {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl('h3', { text: 'Apply Rule to Table' });
-
-    if (!this.plugin.settings.rules?.length) {
-      contentEl.createEl('div', { text: 'No rules defined. Open plugin settings to add rules.' });
-      const openBtn = contentEl.createEl('button', { text: 'Open Settings', cls: 'mod-cta' });
-      openBtn.onclick = () => {
-        this.close();
-        // Open the settings
-        this.app.commands.executeCommandById('app:open-settings');
+    contentEl.addClass('cr-adv-modal');
+    const rule = this.plugin.settings.advancedRules?.[this.index] || { logic:'any', conditions:[], target:'cell', color:null, bg:null };
+    contentEl.createEl('h3', { text: 'Advanced Rules', cls: 'cr-adv-modal-heading' });
+    const logicRow = contentEl.createDiv({ cls: 'cr-adv-logic' });
+    const logicLabel = logicRow.createEl('span', { cls: 'cr-adv-logic-label' });
+    logicLabel.textContent = 'Conditions Match';
+    const logicButtons = logicRow.createDiv({ cls: 'cr-adv-logic-buttons' });
+    const mkBtn = (txt, val) => {
+      const b = logicButtons.createEl('button', { cls: 'cr-adv-logic-btn mod-ghost' });
+      b.textContent = txt;
+      const applyActive = () => {
+        ['any','all','none'].forEach(k => {
+          const q = Array.from(logicButtons.querySelectorAll('.cr-adv-logic-btn')).find(el => el.textContent === k.toUpperCase());
+          if (q) { q.classList.remove('mod-cta'); q.classList.add('mod-ghost'); }
+        });
+        b.classList.add('mod-cta');
+        b.classList.remove('mod-ghost');
       };
-      return;
-    }
+      if (rule.logic === val) applyActive();
+      b.addEventListener('click', async () => { rule.logic = val; await this.plugin.saveSettings(); applyActive(); });
+      return b;
+    };
+    mkBtn('ANY','any'); mkBtn('ALL','all'); mkBtn('NONE','none');
+    contentEl.createEl('h4', { text: 'Conditions', cls: 'cr-adv-h4' });
+    const condsWrap = contentEl.createDiv({ cls: 'cr-adv-conds-wrap' });
+    const TARGET_OPTIONS = [
+      { label: 'COLOR CELL', value: 'cell' },
+      { label: 'COLOR ROW', value: 'row' },
+      { label: 'COLOR COLUMN', value: 'column' },
+    ];
+    const WHEN_OPTIONS = [
+      { label: 'ANY CELL', value: 'anyCell' },
+      { label: 'ALL CELL', value: 'allCell' },
+      { label: 'NO CELL', value: 'noCell' },
+      { label: 'FIRST ROW', value: 'firstRow' },
+      { label: 'COLUMN HEADER', value: 'columnHeader' },
+    ];
+    const MATCH_OPTIONS = [
+      { label: 'IS', value: 'is' },
+      { label: 'IS NOT', value: 'isNot' },
+      { label: 'IS REGEX', value: 'isRegex' },
+      { label: 'CONTAINS', value: 'contains' },
+      { label: 'DOES NOT CONTAIN', value: 'notContains' },
+      { label: 'STARTS WITH', value: 'startsWith' },
+      { label: 'ENDS WITH', value: 'endsWith' },
+      { label: 'DOES NOT START WITH', value: 'notStartsWith' },
+      { label: 'DOES NOT END WITH', value: 'notEndsWith' },
+      { label: 'IS EMPTY', value: 'isEmpty' },
+      { label: 'IS NOT EMPTY', value: 'isNotEmpty' },
+      { label: 'IS EQUAL TO', value: 'eq' },
+      { label: 'IS GREATER THAN', value: 'gt' },
+      { label: 'IS LESS THAN', value: 'lt' },
+      { label: 'IS GREATER THAN & EQUAL TO', value: 'ge' },
+      { label: 'IS LESS THAN & EQUAL TO', value: 'le' },
+    ];
+    const renderConds = () => {
+      condsWrap.empty();
+      (rule.conditions||[]).forEach((cond, ci) => {
+        const row = condsWrap.createDiv({ cls: 'cr-adv-cond-row pretty-flex' });
+        const whenSel = row.createEl('select', { cls: 'cr-select cr-adv-cond-when' });
+        WHEN_OPTIONS.forEach(opt => { const o = whenSel.createEl('option'); o.value = opt.value; o.text = opt.label; if (cond.when===opt.value) o.selected=true; });
+        whenSel.addEventListener('change', async () => { cond.when = whenSel.value; await this.plugin.saveSettings(); });
+        const matchSel = row.createEl('select', { cls: 'cr-select cr-adv-cond-match' });
+        MATCH_OPTIONS.forEach(opt => { const o = matchSel.createEl('option'); o.value = opt.value; o.text = opt.label; if (cond.match===opt.value) o.selected=true; });
+        matchSel.addEventListener('change', async () => { cond.match = matchSel.value; await this.plugin.saveSettings(); const isNum = ['eq','gt','lt','ge','le'].includes(cond.match); valInput.type = isNum ? 'number' : 'text'; });
+        const isNum = ['eq','gt','lt','ge','le'].includes(cond.match);
+        const valInput = row.createEl('input', { type: isNum ? 'number' : 'text', cls: 'cr-value-input cr-adv-cond-value' });
+        if (cond.value != null) valInput.value = String(cond.value);
+        valInput.addEventListener('change', async () => { const v = valInput.value; cond.value = isNum ? (v === '' ? null : Number(v)) : v; await this.plugin.saveSettings(); });
 
-    const list = contentEl.createEl('div', { cls: 'rule-list' });
-    this.plugin.settings.rules.forEach((rule, idx) => {
-      const row = list.createDiv({ cls: 'rule-row' });
-      row.createEl('span', { text: rule.match, cls: 'rule-match' });
-      row.createEl('span', { text: ` ` });
-      const applyBtn = row.createEl('button', { text: 'Apply', cls: 'mod-cta' });
-      applyBtn.onclick = async () => {
-        // Apply to all cells in this.tableEl matching the rule
-        this.tableEl.querySelectorAll('td, th').forEach(cell => {
-          if (cell.textContent.includes(rule.match)) {
-            if (rule.bg) cell.style.backgroundColor = rule.bg;
-            if (rule.color) cell.style.color = rule.color;
+        // Add per-condition delete button (X)
+        const delBtn = row.createEl('button', { cls: 'mod-ghost cr-adv-cond-del' });
+        try { require('obsidian').setIcon(delBtn, 'x'); } catch (e) { delBtn.textContent = '×'; }
+        delBtn.addEventListener('click', async () => {
+          if (Array.isArray(rule.conditions)) {
+            rule.conditions.splice(ci, 1);
+            await this.plugin.saveSettings();
+            renderConds();
           }
         });
-
-        // Save into plugin.cellData for the active file
-        const fileId = this.plugin.app.workspace.getActiveFile()?.path;
-        if (fileId) {
-          if (!this.plugin.cellData[fileId]) this.plugin.cellData[fileId] = {};
-          const tableIndex = Array.from(this.tableEl.parentNode.querySelectorAll('table')).indexOf(this.tableEl);
-          const tableKey = `table_${tableIndex}`;
-          if (!this.plugin.cellData[fileId][tableKey]) this.plugin.cellData[fileId][tableKey] = {};
-          const tableColors = this.plugin.cellData[fileId][tableKey];
-
-          this.tableEl.querySelectorAll('tr').forEach((tr, rIdx) => {
-            tr.querySelectorAll('td, th').forEach((cell, cIdx) => {
-              if (cell.textContent.includes(rule.match)) {
-                const rowKey = `row_${rIdx}`;
-                if (!tableColors[rowKey]) tableColors[rowKey] = {};
-                tableColors[rowKey][`col_${cIdx}`] = {
-                  ...(tableColors[rowKey][`col_${cIdx}`] || {}),
-                  bg: rule.bg,
-                  color: rule.color
-                };
-              }
-            });
-          });
-
-          await this.plugin.saveDataColors();
-        }
-      };
+      });
+    };
+    renderConds();
+    const addCondRow = contentEl.createDiv({ cls: 'cr-adv-add-row' });
+    const addCondBtn = addCondRow.createEl('button', { cls: 'mod-ghost cr-adv-add-btn' });
+    addCondBtn.textContent = '+ Add Condition';
+    addCondBtn.addEventListener('click', async () => {
+      if (!Array.isArray(rule.conditions)) rule.conditions = [];
+      rule.conditions.push({ when:'anyCell', match:'contains', value:'' });
+      await this.plugin.saveSettings();
+      renderConds();
     });
+    
+    contentEl.createEl('h4', { text: 'Then Color', cls: 'cr-adv-h4' });
+    
+    const colorRow = contentEl.createDiv({ cls: 'cr-adv-color-row pretty-flex' });
+    const targetSel = colorRow.createEl('select', { cls: 'cr-select cr-adv-target' });
+    TARGET_OPTIONS.forEach(opt => { const o = targetSel.createEl('option'); o.value = opt.value; o.text = opt.label; if (rule.target === opt.value) o.selected = true; });
+    targetSel.addEventListener('change', async () => { rule.target = targetSel.value; await this.plugin.saveSettings(); });
+    const colorPicker = colorRow.createEl('input', { type:'color', cls:'cr-color-picker cr-adv-text-color' });
+    colorPicker.value = rule.color || '#000000';
+    colorPicker.title = 'Text Color';
+    colorPicker.addEventListener('change', async () => { rule.color = colorPicker.value; await this.plugin.saveSettings(); });
+    const bgPicker = colorRow.createEl('input', { type:'color', cls:'cr-bg-picker cr-adv-bg-color' });
+    bgPicker.value = rule.bg || '#000000';
+    bgPicker.title = 'Background Color';
+    bgPicker.addEventListener('change', async () => { rule.bg = bgPicker.value; await this.plugin.saveSettings(); });
+    
+    // Custom Name Section - AFTER color swatches
+    contentEl.createEl('h4', { text: 'Rule Name (Optional)', cls: 'cr-adv-h4' });
+    const nameRow = contentEl.createDiv({ cls: 'cr-adv-name-row' });
+    const nameInput = nameRow.createEl('input', { type: 'text', cls: 'cr-adv-name-input' });
+    nameInput.style.width = '100%';
+    nameInput.placeholder = 'Leave empty to use automatic naming';
+    if (rule.name) nameInput.value = rule.name;
+    nameInput.addEventListener('change', async () => { rule.name = nameInput.value; await this.plugin.saveSettings(); document.dispatchEvent(new CustomEvent('ctc-adv-rules-changed')); });
+    const actionsRow = contentEl.createDiv({ cls: 'cr-adv-actions-row' });
+    const deleteBtn = actionsRow.createEl('button', { cls: 'cr-adv-delete' });
+    deleteBtn.textContent = 'Delete Rule';
+    deleteBtn.addEventListener('click', async () => {
+      if (Array.isArray(this.plugin.settings.advancedRules)) {
+        this.plugin.settings.advancedRules.splice(this.index, 1);
+        await this.plugin.saveSettings();
+        document.dispatchEvent(new CustomEvent('ctc-adv-rules-changed'));
+      }
+      this.close();
+    });
+    const saveBtn = actionsRow.createEl('button', { cls: 'mod-cta cr-adv-save' });
+    saveBtn.textContent = 'Save Rule';
+    saveBtn.addEventListener('click', () => { document.dispatchEvent(new CustomEvent('ctc-adv-rules-changed')); this.close(); });
   }
-
-  onClose() {
-    this.contentEl.empty();
-  }
+  onClose() { this.contentEl.empty(); }
 }
+
+// Modal to list rules and apply them to a specific table element

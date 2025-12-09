@@ -46,8 +46,9 @@ th[style*="background-color"]:hover {
 
 .num-op-select {
   height: 1.8em !important;
-  min-width: 2.7em;
-  font-size: 1.1em;
+  min-width: 12em !important;
+  width: 12em !important;
+  font-size: 1em;
 }
 
 .num-value-input {
@@ -74,33 +75,7 @@ th[style*="background-color"]:hover {
   cursor: pointer;
 }
 
-.add-btn,
-.add-rule-btn {
-  background: var(--interactive-accent) !important;
-  border: none;
-  min-width: 6em;
-  height: 2.4em;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: background 0.2s ease;
-  color: var(--text-on-accent, #fff);
-  font-weight: 500;
-  font-size: var(--font-ui-small);
-  margin-left: 0.2em;
-}
 
-.add-btn:hover,
-.add-rule-btn:hover {
-  background: var(--interactive-accent-hover) !important;
-}
-
-.num-rule-row .add-btn,
-.num-rule-row .add-rule-btn {
-  align-self: center;
-  margin-top: 0 !important;
-}
 
 .num-rules-list .setting-item {
   display: flex;
@@ -284,3 +259,159 @@ th[style*="background-color"]:hover {
   display: flex;
   gap: 8px;
 }
+
+/* Coloring Rules UI */
+.cr-header-row, .cr-rule-row {
+  display: grid;
+  grid-template-columns: 130px 140px 200px 160px 32px 32px 40px;
+  align-items: center;
+  gap: 6px;
+  margin: 10px 0 !important;
+}
+
+.cr-disabled-row { opacity: 0.6; }
+
+.cr-select {
+  height: 2.2em;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  border-radius: 4px;
+  padding: 0 8px;
+  text-align: center;
+}
+.cr-value-input {
+  height: 2.2em;
+  border-radius: 4px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  padding: 0 8px;
+}
+.cr-color-picker, .cr-bg-picker {
+  height: 2em;
+  width: 2em;
+  padding: 0;
+  border: none;
+  background: none;
+}
+
+.cr-del-btn {
+  width: 1.8em;
+  font-size: 18px;
+  background-color: #fb464c !important;
+  color: var(--background-primary) !important;
+  border: none !important;
+}
+
+.cr-adv-delete {
+  background-color: #fb464c !important;
+  color: var(--background-primary) !important;
+}
+
+
+.cr-add-row { display: flex; justify-content: flex-end; gap: 6px; margin-top: 16px; }
+.cr-add-flex { flex: 1; }
+
+.cr-color-picker {
+    margin-left: 2px !important;
+}
+
+.cr-bg-picker {
+    margin-left: -4px !important;
+}
+
+.cr-del-btn {
+    margin-left: -6px !important;
+}
+
+.cr-adv-heading { margin-top: 18px; }
+.cr-adv-list { display: flex; flex-direction: column; gap: 8px; }
+.cr-adv-row { display: flex; align-items: center; gap: 8px; }
+.cr-adv-label { flex: 1; }
+.cr-adv-actions { margin-top: 10px; display: flex; justify-content: flex-end; }
+
+.cr-adv-modal { padding: 18px; }
+.cr-adv-modal-heading { margin: 0 0 12px 0; text-align: center; }
+.cr-adv-logic { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.cr-adv-logic-buttons { display: flex; gap: 8px; }
+.cr-adv-logic-label { color: var(--text-normal); }
+.cr-adv-logic-btn { min-width: 56px; }
+.cr-adv-h4 { margin-top: 12px; margin-bottom: 6px; }
+.cr-adv-conds-wrap { display: flex; flex-direction: column; gap: 4px; }
+.cr-adv-cond-row { display: flex; align-items: center; gap: 4px; }
+.cr-adv-cond-when, .cr-adv-cond-match { min-width: 160px; }
+.cr-adv-cond-value { flex: 1; min-width: 0; }
+.cr-adv-add-row { margin-top: 8px; }
+.cr-adv-add-btn { min-width: 140px; }
+.cr-adv-color-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.cr-adv-target { min-width: 160px; }
+.cr-adv-text-color, .cr-adv-bg-color { height: 2em; width: 2em; }
+.cr-adv-actions-row { margin-top: 12px; display: flex; justify-content: space-between; align-items: center; }
+.cr-adv-save { }
+.cr-adv-delete { background-color: #fb464c !important; border: none !important; }
+
+/* Search input with left icon */
+.ctc-search-container { position: relative; }
+.ctc-search-input {
+  width: 100%;
+  padding-left: 28px !important;
+  background-color: var(--background-modifier-form-field);
+  background-repeat: no-repeat;
+  background-position: 8px center;
+  background-size: 16px 16px;
+  background-image: url("data:image/svg+xml;charset=UTF-8,%3Csvg width='16' height='16' viewBox='0 0 24 24' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Ccircle cx='11' cy='11' r='7' stroke='%237a7a7a' stroke-width='2'/%3E%3Cline x1='16.5' y1='16.5' x2='21' y2='21' stroke='%237a7a7a' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+.ctc-search-icon {
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 16px;
+  pointer-events: none;
+  opacity: 0.7;
+  background-color: var(--text-muted);
+  -webkit-mask-size: 16px 16px;
+  mask-size: 16px 16px;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='black' d='M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='black' d='M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z'/%3E%3C/svg%3E");
+}
+
+
+.cr-disabled-row .cr-select:hover {
+    background: var(--background-primary);
+}
+
+/* --- */
+.cr-adv-modal-heading {
+    margin: -18px 0 24px 0;
+    text-align: center;
+}
+
+.cr-adv-heading {
+    margin-top: 32px !important;
+}
+
+/* .cr-section { position: relative; }
+.cr-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--background-primary);
+  border-bottom: 1px solid var(--background-modifier-border);
+  padding: 6px 0;
+}
+
+.cr-adv-cond-del {
+  background: none !important;
+  border: none !important;
+  color: var(--text-muted) !important;
+}
+.cr-adv-cond-del:hover {
+  color: var(--color-red, #fb464c) !important;
+} */
