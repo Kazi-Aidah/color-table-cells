@@ -1,9 +1,9 @@
 const { Plugin, PluginSettingTab, Setting, Menu, ButtonComponent, Modal } = require('obsidian');
 
 // Debug configuration
-const IS_DEVELOPMENT = true;
-const debugLog = (...args) => IS_DEVELOPMENT && console.log('[CTC-DEBUG]', ...args);
-const debugWarn = (...args) => IS_DEVELOPMENT && console.warn('[CTC-WARN]', ...args);
+const IS_DEVELOPMENT = false;
+const debugLog = IS_DEVELOPMENT ? (...args) => console.log('[CTC-DEBUG]', ...args) : () => {};
+const debugWarn = IS_DEVELOPMENT ? (...args) => console.warn('[CTC-WARN]', ...args) : () => {};
 
 module.exports = class TableColorPlugin extends Plugin {
   // Undo/redo stacks
@@ -117,13 +117,14 @@ module.exports = class TableColorPlugin extends Plugin {
       }
     });
 
-    this.addCommand({
-      id: 'open-regex-tester',
-      name: 'Open Regex Pattern Tester',
-      callback: () => {
-        new RegexTesterModal(this.app, this).open();
-      }
-    });
+    // REGEX PATTERN TESTER COMMAND
+    // this.addCommand({
+    //   id: 'open-regex-tester',
+    //   name: 'Open Regex Pattern Tester',
+    //   callback: () => {
+    //     new RegexTesterModal(this.app, this).open();
+    //   }
+    // });
 
     // --- Live Preview Table Coloring logic ---
     this.applyColorsToAllEditors = () => {
@@ -155,25 +156,21 @@ module.exports = class TableColorPlugin extends Plugin {
       const allTables = document.querySelectorAll('.cm-content table');
       debugLog(`Found ${allTables.length} tables total in live preview`);
       
+      // Get ALL tables in the document for global indexing (to match reading mode and stored data)
+      const allDocTables = Array.from(document.querySelectorAll('table'));
+      
       allTables.forEach((tableEl, tableIdx) => {
         const file = this.app.workspace.getActiveFile();
         if (file) {
           const noteData = this.cellData[file.path] || {};
           
-          // Try to get the correct table index
-          let tableIndex = tableEl.getAttribute('data-ctc-index');
-          if (tableIndex === null) {
-            // If no saved index, calculate it
-            const containerTables = Array.from(tableEl.closest('.cm-content')?.querySelectorAll('table') || []);
-            tableIndex = containerTables.indexOf(tableEl);
-          } else {
-            tableIndex = parseInt(tableIndex);
-          }
+          // Calculate GLOBAL table index (not just within editor)
+          const globalTableIndex = allDocTables.indexOf(tableEl);
           
-          const tableKey = `table_${tableIndex}`;
+          const tableKey = `table_${globalTableIndex}`;
           const tableColors = noteData[tableKey] || {};
           
-          debugLog(`Table ${tableIdx}: key=${tableKey}, index=${tableIndex}, has colors:`, Object.keys(tableColors).length > 0);
+          debugLog(`Table ${tableIdx}: key=${tableKey}, global index=${globalTableIndex}, has colors:`, Object.keys(tableColors).length > 0);
           
           let coloredCells = 0;
           Array.from(tableEl.querySelectorAll('tr')).forEach((tr, rIdx) => {
@@ -184,6 +181,8 @@ module.exports = class TableColorPlugin extends Plugin {
               const colorData = rowColors[`col_${cIdx}`];
               if (colorData) {
                 coloredCells++;
+                // Mark as manual so rules don't override
+                cell.setAttribute('data-ctc-manual', 'true');
                 if (colorData.bg) {
                   cell.style.backgroundColor = colorData.bg;
                   cell.setAttribute('data-ctc-bg', colorData.bg);
@@ -231,7 +230,9 @@ module.exports = class TableColorPlugin extends Plugin {
               });
             }, 50);
           };
-          ed.addEventListener('scroll', onScroll);
+          // Save handler for cleanup
+          ed._ctcScrollHandler = onScroll;
+          ed.addEventListener('scroll', ed._ctcScrollHandler);
           ed._ctcScrollListener = true;
         }
       });
@@ -381,6 +382,47 @@ module.exports = class TableColorPlugin extends Plugin {
 
     // Track observers for cleanup
     this._containerObservers = new Map();
+    
+    // Add aggressive table pre-rendering observer for reading mode
+    const tablePreRenderer = new MutationObserver((mutations) => {
+      const file = this.app.workspace.getActiveFile();
+      if (!file) return;
+      
+      const noteData = this.cellData[file.path] || {};
+      const allDocTables = Array.from(document.querySelectorAll('table'));
+      
+      // Look for newly added tables in reading mode
+      mutations.forEach(mutation => {
+        if (mutation.addedNodes.length > 0) {
+          mutation.addedNodes.forEach(node => {
+            if (node.nodeType === Node.ELEMENT_NODE) {
+              // Check if this node or its children contain tables
+              const tables = [];
+              if (node.matches && node.matches('table')) {
+                tables.push(node);
+              }
+              if (node.querySelectorAll) {
+                tables.push(...node.querySelectorAll('table'));
+              }
+              
+              // Immediately color any new tables in reading mode
+              tables.forEach(table => {
+                if (table.closest('.markdown-preview-view') && !table.hasAttribute('data-ctc-processed')) {
+                  const globalTableIdx = allDocTables.indexOf(table);
+                  if (globalTableIdx >= 0) {
+                    this.processSingleTable(table, globalTableIdx, file.path, noteData);
+                  }
+                }
+              });
+            }
+          });
+        }
+      });
+    });
+    
+    // Observe the entire document body for table additions
+    tablePreRenderer.observe(document.body, { childList: true, subtree: true });
+    this._tablePreRenderer = tablePreRenderer;
     
     this.registerMarkdownPostProcessor((el, ctx) => {
       if (!el.closest('.markdown-preview-view')) return;
@@ -738,6 +780,59 @@ module.exports = class TableColorPlugin extends Plugin {
         this._livePreviewObserver.disconnect();
         this._livePreviewObserver = null;
       }
+    } catch (e) { }
+    
+    // Clean up table pre-renderer
+    try {
+      if (this._tablePreRenderer && typeof this._tablePreRenderer.disconnect === 'function') {
+        this._tablePreRenderer.disconnect();
+        this._tablePreRenderer = null;
+      }
+    } catch (e) { }
+    
+    // Clean up reading view scroll observer
+    try {
+      if (this._readingViewScrollObserver && typeof this._readingViewScrollObserver.disconnect === 'function') {
+        this._readingViewScrollObserver.disconnect();
+        this._readingViewScrollObserver = null;
+      }
+    } catch (e) { }
+    
+    // Clean up reading mode checker interval
+    try {
+      if (this._readingModeChecker) {
+        clearInterval(this._readingModeChecker);
+        this._readingModeChecker = null;
+      }
+    } catch (e) { }
+    
+    // Clean up reading view scroll listeners
+    try {
+      document.querySelectorAll('.markdown-preview-view').forEach(view => {
+        // Remove scroll listener if it was added
+        if (view._ctcScrollListenerAdded && view._ctcScrollHandler) {
+          view.removeEventListener('scroll', view._ctcScrollHandler);
+          view._ctcScrollListenerAdded = false;
+          view._ctcScrollHandler = null;
+        }
+      });
+    } catch (e) { }
+    
+    // Clean up editor scroll listeners
+    try {
+      document.querySelectorAll('.cm-content').forEach(ed => {
+        // Disconnect observer
+        if (ed._ctcObserver) {
+          ed._ctcObserver.disconnect();
+          ed._ctcObserver = null;
+        }
+        // Remove scroll listener
+        if (ed._ctcScrollListener && ed._ctcScrollHandler) {
+          ed.removeEventListener('scroll', ed._ctcScrollHandler);
+          ed._ctcScrollListener = false;
+          ed._ctcScrollHandler = null;
+        }
+      });
     } catch (e) { }
     
     // Clean up all container observers to prevent memory leaks
@@ -1232,6 +1327,12 @@ module.exports = class TableColorPlugin extends Plugin {
     return CustomColorPickerMenu;
   }
 
+  // Helper: Get global table index across entire document
+  getGlobalTableIndex(tableEl) {
+    const allDocTables = Array.from(document.querySelectorAll('table'));
+    return allDocTables.indexOf(tableEl);
+  }
+
   async pickColor(cell, tableEl, type) {
     const CustomColorPickerMenu = this.createColorPickerMenu();
     const initialColor = null;
@@ -1240,8 +1341,8 @@ module.exports = class TableColorPlugin extends Plugin {
       // Save color on close
       const fileId = this.app.workspace.getActiveFile()?.path;
       if (!fileId) return;
-      const allTables = Array.from(tableEl.closest('.markdown-preview-section, .markdown-preview-view')?.querySelectorAll('table') || tableEl.ownerDocument.querySelectorAll('table'));
-      const tableIndex = allTables.indexOf(tableEl);
+      // Use GLOBAL table index, not local
+      const tableIndex = this.getGlobalTableIndex(tableEl);
       const rowIndex = Array.from(tableEl.querySelectorAll('tr')).indexOf(cell.closest('tr'));
       const colIndex = Array.from(cell.closest('tr').querySelectorAll('td, th')).indexOf(cell);
       
@@ -1293,8 +1394,8 @@ module.exports = class TableColorPlugin extends Plugin {
       // Save color on close for entire row
       const fileId = this.app.workspace.getActiveFile()?.path;
       if (!fileId) return;
-      const allTables = Array.from(tableEl.closest('.markdown-preview-section, .markdown-preview-view')?.querySelectorAll('table') || tableEl.ownerDocument.querySelectorAll('table'));
-      const tableIndex = allTables.indexOf(tableEl);
+      // Use GLOBAL table index, not local
+      const tableIndex = this.getGlobalTableIndex(tableEl);
       const rowIndex = Array.from(tableEl.querySelectorAll('tr')).indexOf(row);
       
       // Capture current state for undo
@@ -1357,8 +1458,8 @@ module.exports = class TableColorPlugin extends Plugin {
       // Save color on close for entire column
       const fileId = this.app.workspace.getActiveFile()?.path;
       if (!fileId) return;
-      const allTables = Array.from(tableEl.closest('.markdown-preview-section, .markdown-preview-view')?.querySelectorAll('table') || tableEl.ownerDocument.querySelectorAll('table'));
-      const tableIndex = allTables.indexOf(tableEl);
+      // Use GLOBAL table index, not local
+      const tableIndex = this.getGlobalTableIndex(tableEl);
       
       // Capture current state for undo
       const oldColors = {};
@@ -1421,8 +1522,7 @@ module.exports = class TableColorPlugin extends Plugin {
     const fileId = this.app.workspace.getActiveFile()?.path;
     if (!fileId) return;
 
-  const allTables = Array.from(tableEl.closest('.markdown-preview-section, .markdown-preview-view')?.querySelectorAll('table') || tableEl.ownerDocument.querySelectorAll('table'));
-  const tableIndex = allTables.indexOf(tableEl);
+  const tableIndex = this.getGlobalTableIndex(tableEl);
   const rowIndex = Array.from(tableEl.querySelectorAll('tr')).indexOf(cell.closest('tr'));
   const colIndex = Array.from(cell.closest('tr').querySelectorAll('td, th')).indexOf(cell);
 
@@ -1438,8 +1538,7 @@ module.exports = class TableColorPlugin extends Plugin {
     const fileId = this.app.workspace.getActiveFile()?.path;
     if (!fileId) return;
 
-    const allTables = Array.from(tableEl.closest('.markdown-preview-section, .markdown-preview-view')?.querySelectorAll('table') || tableEl.ownerDocument.querySelectorAll('table'));
-    const tableIndex = allTables.indexOf(tableEl);
+    const tableIndex = this.getGlobalTableIndex(tableEl);
     const rowIndex = Array.from(tableEl.querySelectorAll('tr')).indexOf(cell.closest('tr'));
 
     const noteData = this.cellData[fileId] || {};
@@ -1464,8 +1563,7 @@ module.exports = class TableColorPlugin extends Plugin {
     const fileId = this.app.workspace.getActiveFile()?.path;
     if (!fileId) return;
 
-    const allTables = Array.from(tableEl.closest('.markdown-preview-section, .markdown-preview-view')?.querySelectorAll('table') || tableEl.ownerDocument.querySelectorAll('table'));
-    const tableIndex = allTables.indexOf(tableEl);
+    const tableIndex = this.getGlobalTableIndex(tableEl);
     const colIndex = Array.from(cell.closest('tr').querySelectorAll('td, th')).indexOf(cell);
 
     if (!this.cellData[fileId]) this.cellData[fileId] = {};
@@ -1509,8 +1607,14 @@ module.exports = class TableColorPlugin extends Plugin {
   }
 
   async saveDataColors() {
-  await this.saveData({ settings: this.settings, cellData: this.cellData });
-  this.applyColorsToActiveFile();
+    await this.saveData({ settings: this.settings, cellData: this.cellData });
+    // Sync colors to both reading and live preview modes
+    // Use setTimeout to ensure DOM is ready
+    setTimeout(() => this.applyColorsToActiveFile(), 10);
+    // Also explicitly apply to live preview editor if enabled
+    if (this.settings.livePreviewColoring && typeof this.applyColorsToAllEditors === 'function') {
+      setTimeout(() => this.applyColorsToAllEditors(), 20);
+    }
   }
 
   // Create snapshot of current state for undo/redo
@@ -1820,6 +1924,8 @@ module.exports = class TableColorPlugin extends Plugin {
       const applyCellStyle = (cell) => {
         if (!cell) return;
         if (cell.hasAttribute('data-ctc-manual')) return;
+        // Also check if cell already has colors from manual application
+        if (cell.style.backgroundColor || cell.style.color) return;
         if (rule.bg) cell.style.backgroundColor = rule.bg;
         if (rule.color) cell.style.color = rule.color;
       };
@@ -1918,7 +2024,7 @@ module.exports = class TableColorPlugin extends Plugin {
           else if (logic === 'none') ok = flags.every(f => !f);
           else ok = flags.some(Boolean);
           if (ok) {
-            Array.from(rows[r].querySelectorAll('td, th')).forEach(cell => { if (bg) cell.style.backgroundColor = bg; if (color) cell.style.color = color; });
+            Array.from(rows[r].querySelectorAll('td, th')).forEach(cell => { if (cell.hasAttribute('data-ctc-manual') || cell.style.backgroundColor || cell.style.color) return; if (bg) cell.style.backgroundColor = bg; if (color) cell.style.color = color; });
           }
         }
       } else if (target === 'column') {
@@ -1939,7 +2045,7 @@ module.exports = class TableColorPlugin extends Plugin {
           if (logic === 'all') ok = flags.every(Boolean);
           else if (logic === 'none') ok = flags.every(f => !f);
           else ok = flags.some(Boolean);
-          if (ok) { for (let r = 0; r < rows.length; r++) { const cell = getCell(r, c); if (cell) { if (bg) cell.style.backgroundColor = bg; if (color) cell.style.color = color; } } }
+          if (ok) { for (let r = 0; r < rows.length; r++) { const cell = getCell(r, c); if (cell && !cell.hasAttribute('data-ctc-manual') && !cell.style.backgroundColor && !cell.style.color) { if (bg) cell.style.backgroundColor = bg; if (color) cell.style.color = color; } } }
         }
       } else {
         // target === 'cell' - color individual cells
@@ -1968,7 +2074,7 @@ module.exports = class TableColorPlugin extends Plugin {
             else ok = flags.some(Boolean);
             if (ok) { 
               const cell = getCell(r, c); 
-              if (cell) { 
+              if (cell && !cell.hasAttribute('data-ctc-manual') && !cell.style.backgroundColor && !cell.style.color) { 
                 if (bg) cell.style.backgroundColor = bg; 
                 if (color) cell.style.color = color; 
               } 
@@ -2065,31 +2171,10 @@ module.exports = class TableColorPlugin extends Plugin {
     const noteData = this.cellData[filePath] || {};
     
     debugLog(`applyColorsToContainer: filePath=${filePath}, found ${tables.length} tables, has noteData:`, Object.keys(noteData).length > 0, 'inPreview:', inPreview, 'inEditor:', inEditor);
-    // Get ALL tables in the correct scope
-    let allTables = [];
-    if (inPreview) {
-      // In reading mode, use tables from the markdown-preview-view
-      const previewRoot = container.closest('.markdown-preview-view');
-      if (previewRoot) {
-        allTables = Array.from(previewRoot.querySelectorAll('table'));
-      } else {
-        allTables = Array.from(document.querySelectorAll('.markdown-preview-view table'));
-      }
-    } else if (inEditor) {
-      // In live preview, use tables from all cm-content editors for this file
-      const file = this.app.workspace.getActiveFile();
-      if (file) {
-        const editors = Array.from(document.querySelectorAll('.cm-content'));
-        allTables = [];
-        editors.forEach(editor => {
-          allTables.push(...Array.from(editor.querySelectorAll('table')));
-        });
-      }
-    } else {
-      allTables = Array.from(container.querySelectorAll('table'));
-    }
+    // Get ALL tables in the correct scope - ALWAYS use global table list
+    let allTables = Array.from(document.querySelectorAll('table'));
 
-    debugLog(`All tables in scope: ${allTables.length}, container tables: ${tables.length}, inPreview: ${inPreview}, inEditor: ${inEditor}`);
+    debugLog(`All tables in document: ${allTables.length}, container tables: ${tables.length}, inPreview: ${inPreview}, inEditor: ${inEditor}`);
 
     // Process each table
     tables.forEach((tableEl) => {
@@ -2121,13 +2206,34 @@ module.exports = class TableColorPlugin extends Plugin {
   applyColorsToActiveFile() {
     debugLog('applyColorsToActiveFile called');
     const file = this.app.workspace.getActiveFile();
-    if (!file) return;
+    if (!file) {
+      debugWarn('No active file found in applyColorsToActiveFile');
+      return;
+    }
     
-    // Apply to reading preview
+    // Apply to reading preview - IMMEDIATELY pre-render ALL tables with both manual and rule colors
     const previewViews = document.querySelectorAll('.markdown-preview-view');
+    const noteData = this.cellData[file.path] || {};
+    const allDocTables = Array.from(document.querySelectorAll('table'));
+    
+    debugLog(`applyColorsToActiveFile: file=${file.path}, found ${previewViews.length} preview views, cellData has keys:`, Object.keys(noteData));
+    
     previewViews.forEach(view => {
       if (view.isConnected) {
-        this.applyColorsToContainer(view, file.path);
+        // Get ALL tables in the reading view
+        const allTables = Array.from(view.querySelectorAll('table'));
+        debugLog(`applyColorsToActiveFile: Found ${allTables.length} tables in reading view`);
+        
+        // IMMEDIATELY process every single table without waiting
+        // processSingleTable will apply both manual colors AND rules
+        allTables.forEach((table) => {
+          const globalTableIdx = allDocTables.indexOf(table);
+          if (globalTableIdx >= 0) {
+            debugLog(`Processing table ${globalTableIdx} in reading mode with noteData:`, Object.keys(noteData).includes(`table_${globalTableIdx}`));
+            this.processSingleTable(table, globalTableIdx, file.path, noteData);
+          }
+        });
+        // Don't call applyColorsToContainer after processSingleTable - it's redundant
       }
     });
     
@@ -2159,6 +2265,8 @@ module.exports = class TableColorPlugin extends Plugin {
     
     let coloredCount = 0;
     const tableId = `${filePath}:${tableIndex}`;
+    const manualColoredCells = new Set(); // Track which cells have manual colors
+    
     Array.from(tableEl.querySelectorAll('tr')).forEach((tr, rIdx) => {
       const rowKey = `row_${rIdx}`;
       const rowColors = tableColors[rowKey] || {};
@@ -2168,6 +2276,7 @@ module.exports = class TableColorPlugin extends Plugin {
         const colorData = rowColors[`col_${cIdx}`];
         if (colorData) {
           coloredCount++;
+          manualColoredCells.add(cell); // Mark this cell as manually colored
           if (colorData.bg) {
             cell.style.backgroundColor = colorData.bg;
             cell.setAttribute('data-ctc-bg', colorData.bg);
@@ -2184,11 +2293,23 @@ module.exports = class TableColorPlugin extends Plugin {
       });
     });
     
-    debugLog(`Table index ${tableIndex}: colored ${coloredCount} cells`);
+    debugLog(`Table index ${tableIndex}: colored ${coloredCount} cells with manual colors`);
     
     // Apply rules after manual; rule methods will skip cells marked as manual
     this.applyColoringRulesToTable(tableEl);
     this.applyAdvancedRulesToTable(tableEl);
+    
+    // CRITICAL: Re-enforce manual colors after rules (to ensure rules didn't override)
+    manualColoredCells.forEach(cell => {
+      const bg = cell.getAttribute('data-ctc-bg');
+      const color = cell.getAttribute('data-ctc-color');
+      if (bg && cell.style.backgroundColor !== bg) {
+        cell.style.backgroundColor = bg;
+      }
+      if (color && cell.style.color !== color) {
+        cell.style.color = color;
+      }
+    });
     
     // Ensure colors persist by marking the table as processed
     tableEl.setAttribute('data-ctc-last-processed', Date.now());
@@ -2223,7 +2344,9 @@ module.exports = class TableColorPlugin extends Plugin {
     const addScrollListeners = () => {
       document.querySelectorAll('.markdown-preview-view').forEach(view => {
         if (!view._ctcScrollListenerAdded) {
-          view.addEventListener('scroll', handleReadingViewScroll, { passive: true });
+          // Save handler reference for cleanup
+          view._ctcScrollHandler = handleReadingViewScroll;
+          view.addEventListener('scroll', view._ctcScrollHandler, { passive: true });
           view._ctcScrollListenerAdded = true;
           debugLog('Added scroll listener to reading view');
         }
@@ -2254,27 +2377,27 @@ module.exports = class TableColorPlugin extends Plugin {
       const readingViews = document.querySelectorAll('.markdown-preview-view');
       if (readingViews.length === 0) return;
       
-      // Check if we have uncolored tables
-      let hasUncoloredTables = false;
+      // Proactively color ALL tables in each reading view
       readingViews.forEach(view => {
-        const tables = view.querySelectorAll('table');
-        tables.forEach(table => {
-          // Check if table has been processed
+        const allTables = Array.from(view.querySelectorAll('table'));
+        const noteData = this.cellData[file.path] || {};
+        const allDocTables = Array.from(document.querySelectorAll('table'));
+        
+        allTables.forEach(table => {
+          // Color all tables immediately, don't wait for them to be scrolled into view
           if (!table.hasAttribute('data-ctc-processed')) {
-            hasUncoloredTables = true;
+            const globalTableIdx = allDocTables.indexOf(table);
+            this.processSingleTable(table, globalTableIdx, file.path, noteData);
           }
+        });
+        
+        // Also ensure rules are applied to all tables
+        allTables.forEach(table => {
+          this.applyColoringRulesToTable(table);
+          this.applyAdvancedRulesToTable(table);
         });
       });
-      
-      if (hasUncoloredTables) {
-        debugLog('Periodic check: Found uncolored tables in reading mode, applying colors');
-        readingViews.forEach(view => {
-          if (view.isConnected) {
-            this.applyColorsToContainer(view, file.path);
-          }
-        });
-      }
-    }, 2000); // Check every 2 seconds
+    }, 500); // Check every 500ms for new tables that need coloring
     
     // Clean up on unload
     this.register(() => {
@@ -2519,7 +2642,8 @@ class ReleaseNotesModal extends Modal {
         notes.style.marginTop = '16px';
         notes.style.lineHeight = '1.6';
         notes.style.fontSize = '0.95em';
-        notes.addClass('markdown-preview-view');
+        notes.style.padding = '12px !important';
+        // notes.addClass('markdown-preview-view');
 
         const md = data.body || 'No notes';
         try {
@@ -2527,13 +2651,19 @@ class ReleaseNotesModal extends Modal {
           const comp = new require('obsidian').Component();
           MarkdownRenderer.render(this.app, md, notes, '', comp);
         } catch (e) {
-          notes.innerHTML = md.replace(/\n/g, '<br>');
+          // Fallback: render markdown as plain text with line breaks
+          const lines = md.split('\n');
+          lines.forEach(line => {
+            if (line.trim()) {
+              notes.createEl('p', { text: line });
+            }
+          });
         }
       })
       .catch(error => {
         body.empty();
         body.createEl('div', { text: 'Failed to load release notes.' });
-        console.error('Error fetching release notes:', error);
+        debugWarn('Error fetching release notes:', error);
       });
   }
 
@@ -2911,6 +3041,12 @@ class ColorTableSettingTab extends PluginSettingTab {
         const label = row.createEl('span', { cls: 'cr-adv-label' });
         label.textContent = summaryForAdvRule(ar);
 
+        const copyBtn = row.createEl('button', { cls: 'mod-ghost cr-adv-copy' });
+        copyBtn.setAttribute('aria-label', 'Duplicate rule');
+        copyBtn.setAttribute('title', 'Duplicate rule');
+        try { require('obsidian').setIcon(copyBtn, 'copy'); } catch (e) {}
+        copyBtn.addEventListener('click', async () => { const ruleCopy = JSON.parse(JSON.stringify(ar)); this.plugin.settings.advancedRules.splice(originalIdx + 1, 0, ruleCopy); await this.plugin.saveSettings(); document.dispatchEvent(new Event('ctc-adv-rules-changed')); });
+
         const settingsBtn = row.createEl('button', { cls: 'mod-ghost cr-adv-settings' });
         try { require('obsidian').setIcon(settingsBtn, 'settings'); } catch (e) {}
         settingsBtn.addEventListener('click', () => { new AdvancedRuleModal(this.app, this.plugin, originalIdx).open(); });
@@ -2979,6 +3115,72 @@ class ColorTableSettingTab extends PluginSettingTab {
       });
       input.click();
     });
+
+    // Delete manual coloring entries
+    containerEl.createEl('h3', { text: 'Danger Zone', cls: 'cr-danger-heading' });
+    const deleteManualRow = containerEl.createDiv({ cls: 'cr-delete-row pretty-flex' });
+    const deleteManualBtn = deleteManualRow.createEl('button', { text: 'Delete All Manual Colors', cls: 'mod-warning' });
+    deleteManualBtn.addEventListener('click', () => {
+      const modal = new Modal(this.app);
+      modal.contentEl.createEl('h2', { text: 'Delete All Manual Colors?' });
+      modal.contentEl.createEl('p', { text: 'This will remove all manually colored cells (non-rule colors). This action cannot be undone.' });
+      const btnRow = modal.contentEl.createDiv({ cls: 'pretty-flex' });
+      const cancelBtn = btnRow.createEl('button', { text: 'Cancel', cls: 'mod-ghost' });
+      const confirmBtn = btnRow.createEl('button', { text: 'Delete All', cls: 'mod-warning' });
+      cancelBtn.addEventListener('click', () => modal.close());
+      confirmBtn.addEventListener('click', async () => {
+        this.plugin.cellData = {};
+        await this.plugin.saveData({ settings: this.plugin.settings, cellData: this.plugin.cellData });
+        this.plugin.applyColorsToActiveFile();
+        new Notice('All manual colors deleted');
+        modal.close();
+      });
+      modal.open();
+    });
+
+    // Delete coloring rules
+    const deleteRulesRow = containerEl.createDiv({ cls: 'cr-delete-row pretty-flex' });
+    const deleteRulesBtn = deleteRulesRow.createEl('button', { text: 'Delete All Coloring Rules', cls: 'mod-warning' });
+    deleteRulesBtn.addEventListener('click', () => {
+      const modal = new Modal(this.app);
+      modal.contentEl.createEl('h2', { text: 'Delete All Coloring Rules?' });
+      modal.contentEl.createEl('p', { text: `This will remove all ${Array.isArray(this.plugin.settings.coloringRules) ? this.plugin.settings.coloringRules.length : 0} coloring rules. This action cannot be undone.` });
+      const btnRow = modal.contentEl.createDiv({ cls: 'pretty-flex' });
+      const cancelBtn = btnRow.createEl('button', { text: 'Cancel', cls: 'mod-ghost' });
+      const confirmBtn = btnRow.createEl('button', { text: 'Delete All', cls: 'mod-warning' });
+      cancelBtn.addEventListener('click', () => modal.close());
+      confirmBtn.addEventListener('click', async () => {
+        this.plugin.settings.coloringRules = [];
+        await this.plugin.saveSettings();
+        this.plugin.applyColorsToActiveFile();
+        new Notice('All coloring rules deleted');
+        modal.close();
+        this.display();
+      });
+      modal.open();
+    });
+
+    // Delete advanced rules
+    const deleteAdvRulesRow = containerEl.createDiv({ cls: 'cr-delete-row pretty-flex' });
+    const deleteAdvRulesBtn = deleteAdvRulesRow.createEl('button', { text: 'Delete All Advanced Rules', cls: 'mod-warning' });
+    deleteAdvRulesBtn.addEventListener('click', () => {
+      const modal = new Modal(this.app);
+      modal.contentEl.createEl('h2', { text: 'Delete All Advanced Rules?' });
+      modal.contentEl.createEl('p', { text: `This will remove all ${Array.isArray(this.plugin.settings.advancedRules) ? this.plugin.settings.advancedRules.length : 0} advanced rules. This action cannot be undone.` });
+      const btnRow = modal.contentEl.createDiv({ cls: 'pretty-flex' });
+      const cancelBtn = btnRow.createEl('button', { text: 'Cancel', cls: 'mod-ghost' });
+      const confirmBtn = btnRow.createEl('button', { text: 'Delete All', cls: 'mod-warning' });
+      cancelBtn.addEventListener('click', () => modal.close());
+      confirmBtn.addEventListener('click', async () => {
+        this.plugin.settings.advancedRules = [];
+        await this.plugin.saveSettings();
+        this.plugin.applyColorsToActiveFile();
+        new Notice('All advanced rules deleted');
+        modal.close();
+        this.display();
+      });
+      modal.open();
+    });
   }
 }
 
@@ -2989,7 +3191,7 @@ class AdvancedRuleModal extends Modal {
     contentEl.empty();
     contentEl.addClass('cr-adv-modal');
     const rule = this.plugin.settings.advancedRules?.[this.index] || { logic:'any', conditions:[], target:'cell', color:null, bg:null };
-    contentEl.createEl('h3', { text: 'Advanced Rules', cls: 'cr-adv-modal-heading' });
+    contentEl.createEl('h3', { text: 'Advanced Rules Builder', cls: 'cr-adv-modal-heading' });
     const logicRow = contentEl.createDiv({ cls: 'cr-adv-logic' });
     const logicLabel = logicRow.createEl('span', { cls: 'cr-adv-logic-label' });
     logicLabel.textContent = 'Conditions Match';

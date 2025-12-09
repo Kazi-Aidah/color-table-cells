@@ -36,6 +36,17 @@ th[style*="background-color"]:hover {
 
 
 
+.modal-delete-buttons {
+  display: flex;
+  gap: 0.75em;
+  justify-content: flex-end;
+  margin-top: 1.5em;
+}
+
+.modal-delete-buttons button {
+  min-width: 100px;
+}
+
 .pretty-flex {
   display: flex;
   align-items: center;
@@ -415,3 +426,50 @@ th[style*="background-color"]:hover {
 .cr-adv-cond-del:hover {
   color: var(--color-red, #fb464c) !important;
 } */
+
+/* Danger Zone Styling */
+.cr-danger-heading {
+  color: var(--color-red, #fb464c);
+  margin-top: 2em;
+  margin-bottom: 1em;
+}
+
+.cr-delete-container {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.5em;
+}
+
+@media (max-width: 900px) {
+  .cr-delete-container {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 600px) {
+  .cr-delete-container {
+    grid-template-columns: 1fr;
+  }
+}
+
+.cr-delete-row {
+  padding: 0.75em;
+  border: 1px solid #fb464c40;
+  border-radius: 4px;
+  background: rgba(251, 70, 76, 0.05);
+}
+
+.cr-delete-row button.mod-warning {
+  background-color: var(--color-red, #fb464c);
+  color: var(--background-primary);
+  border: none;
+  padding: 0.5em 1em;
+  border-radius: 3px;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.cr-delete-row button.mod-warning:hover {
+  background-color: var(--color-red, #d93035);
+  opacity: 0.9;
+}
