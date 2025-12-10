@@ -5,7 +5,7 @@ Supports both manual coloring and automatic rules based on text, numbers, and re
 ![Table Example](assets/table-example.png)
 
 By default, colors appear in **Reading Mode**.
-You can enable coloring in **Live Preview Mode**- from settings.
+You can enable coloring in **Live Preview Mode** from settings.
 
 ## Manual Coloring
 
@@ -15,7 +15,9 @@ You can enable coloring in **Live Preview Mode**- from settings.
 
 ![Right Click Menu](assets/right-click-menu.png)
 
-Currently, the manual coloring is a bit unstable, and the coloring does not always apply properly across views. ***The rule based coloring works much more reliably.***
+Currently, the manual coloring is a bit unstable, and the coloring does not always apply properly across views. ***The rule based coloring works much more reliably.*** 
+
+> For best experience, I'd recommend not introducing manual colors in a rule-based coloring table.
 
 
 ## Automatic Coloring with Rules
@@ -27,7 +29,7 @@ No more manual formatting for large tables!
 
 ### Simple Rules
 
-A simple rule uses a single condition:
+A simple rule uses a single condition of these properties:
 
 **TARGET**
 What gets colored
@@ -88,6 +90,10 @@ Color a cell green only when:
 - It contains a number
 - The number is greater than 100
 
+### Refreshing Table Colors
+Changes you make in the plugin settings apply immediately. If you ever see outdated colors due to Obsidian not updating the table view, you can force a refresh using the table colors refresh button in the ribbon or the status bar icon.
+
+![Refresh Table Colors Icon](assets/ribbon-icon.png)
 
 <!-- 
 ## How Single Cell Coloring Works
@@ -121,7 +127,6 @@ In `Math.md`, table 0, row 1, column 2 has:
 - Background: #FF9494
 - Text: #000000
  -->
-
 
 ## Installation
 This plugin is currently NOT in Obsidian Community Plugins.

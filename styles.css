@@ -322,11 +322,18 @@ th[style*="background-color"]:hover {
 }
 
 .cr-del-btn {
-  width: 1.8em;
-  font-size: 18px;
-  background-color: #fb464c !important;
-  color: var(--background-primary) !important;
-  border: none !important;
+    border: none;
+    box-shadow: none !important;
+    background: none !important;
+    background-color: none !important;
+    color: var(--text-muted) !important;
+    padding: -20px;
+    transform: translateX(-16px);
+    cursor: not-allowed;
+}
+
+.cr-del-btn:hover {
+    color: var(--text-error) !important;
 }
 
 .cr-adv-delete {
@@ -373,7 +380,7 @@ th[style*="background-color"]:hover {
 .cr-adv-target { min-width: 160px; }
 .cr-adv-text-color, .cr-adv-bg-color { height: 2em; width: 2em; }
 .cr-adv-actions-row { margin-top: 12px; display: flex; justify-content: space-between; align-items: center; }
-.cr-adv-save { }
+.cr-adv-save { padding: auto; }
 .cr-adv-delete { background-color: #fb464c !important; border: none !important; }
 
 /* Search input with left icon */
