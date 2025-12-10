@@ -41,10 +41,24 @@ th[style*="background-color"]:hover {
   gap: 0.75em;
   justify-content: flex-end;
   margin-top: 1.5em;
+  flex-wrap: wrap;
 }
 
 .modal-delete-buttons button {
   min-width: 100px;
+  padding: 0.5em 1em;
+  flex-shrink: 0;
+}
+
+@media (max-width: 600px) {
+  .modal-delete-buttons {
+    flex-direction: column-reverse;
+    gap: 0.5em;
+  }
+  
+  .modal-delete-buttons button {
+    width: 100%;
+  }
 }
 
 .pretty-flex {
@@ -457,6 +471,9 @@ th[style*="background-color"]:hover {
   border: 1px solid #fb464c40;
   border-radius: 4px;
   background: rgba(251, 70, 76, 0.05);
+  display: flex;
+  justify-content: center;
+  align-items: center;
 }
 
 .cr-delete-row button.mod-warning {
@@ -472,4 +489,13 @@ th[style*="background-color"]:hover {
 .cr-delete-row button.mod-warning:hover {
   background-color: var(--color-red, #d93035);
   opacity: 0.9;
+}
+
+.cr-adv-color-reset, .cr-adv-bg-reset {
+    margin: 10px !important;
+    transform: translateY(-1px);
+}
+
+.cr-adv-bg-color, .cr-adv-text-color {
+    transform: translateY(5px);
 }

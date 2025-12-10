@@ -1,9 +1,17 @@
-const { Plugin, PluginSettingTab, Setting, Menu, ButtonComponent, Modal } = require('obsidian');
+const { Plugin, PluginSettingTab, Setting, Menu, ButtonComponent, Modal, setIcon } = require('obsidian');
 
-// Debug configuration
-const IS_DEVELOPMENT = false;
-const debugLog = IS_DEVELOPMENT ? (...args) => console.log('[CTC-DEBUG]', ...args) : () => {};
-const debugWarn = IS_DEVELOPMENT ? (...args) => console.warn('[CTC-WARN]', ...args) : () => {};
+// Debug configuration - make it a getter so changes are reflected dynamically
+let IS_DEVELOPMENT = false;
+const debugLog = (...args) => IS_DEVELOPMENT && console.log('[CTC-DEBUG]', ...args);
+const debugWarn = (...args) => IS_DEVELOPMENT && console.warn('[CTC-WARN]', ...args);
+
+// Allow toggling debug mode from console: window.setDebugMode(true/false)
+if (typeof window !== 'undefined') {
+  window.setDebugMode = (value) => {
+    IS_DEVELOPMENT = value;
+    console.log(`[CTC] Debug mode ${value ? 'enabled' : 'disabled'}`);
+  };
+}
 
 module.exports = class TableColorPlugin extends Plugin {
   // Undo/redo stacks
@@ -117,6 +125,14 @@ module.exports = class TableColorPlugin extends Plugin {
       }
     });
 
+    this.addCommand({
+      id: 'refresh-table-colors',
+      name: 'Refresh Table Colors',
+      callback: () => {
+        this.hardRefreshTableColors();
+      }
+    });
+
     // REGEX PATTERN TESTER COMMAND
     // this.addCommand({
     //   id: 'open-regex-tester',
@@ -139,63 +155,32 @@ module.exports = class TableColorPlugin extends Plugin {
         });
         return;
       }
-      const editors = document.querySelectorAll('.cm-content');
-      debugLog(`Found ${editors.length} editors`);
       
-      editors.forEach(editorEl => {
-        if (editorEl.querySelector('table')) {
-          const file = this.app.workspace.getActiveFile();
-          if (file) {
-            debugLog(`Applying colors to editor for file: ${file.path}`);
-            this.applyColorsToContainer(editorEl, file.path);
-          }
-        }
-      });
+      const file = this.app.workspace.getActiveFile();
+      if (!file) {
+        debugWarn('No active file in applyColorsToAllEditors');
+        return;
+      }
       
-      // Also apply to all .cm-content tables directly for manual cell colors
-      const allTables = document.querySelectorAll('.cm-content table');
-      debugLog(`Found ${allTables.length} tables total in live preview`);
-      
-      // Get ALL tables in the document for global indexing (to match reading mode and stored data)
+      const noteData = this.cellData[file.path] || {};
       const allDocTables = Array.from(document.querySelectorAll('table'));
       
-      allTables.forEach((tableEl, tableIdx) => {
-        const file = this.app.workspace.getActiveFile();
-        if (file) {
-          const noteData = this.cellData[file.path] || {};
-          
-          // Calculate GLOBAL table index (not just within editor)
-          const globalTableIndex = allDocTables.indexOf(tableEl);
-          
-          const tableKey = `table_${globalTableIndex}`;
-          const tableColors = noteData[tableKey] || {};
-          
-          debugLog(`Table ${tableIdx}: key=${tableKey}, global index=${globalTableIndex}, has colors:`, Object.keys(tableColors).length > 0);
-          
-          let coloredCells = 0;
-          Array.from(tableEl.querySelectorAll('tr')).forEach((tr, rIdx) => {
-            const rowKey = `row_${rIdx}`;
-            const rowColors = tableColors[rowKey] || {};
-            const cells = Array.from(tr.querySelectorAll('td, th'));
-            cells.forEach((cell, cIdx) => {
-              const colorData = rowColors[`col_${cIdx}`];
-              if (colorData) {
-                coloredCells++;
-                // Mark as manual so rules don't override
-                cell.setAttribute('data-ctc-manual', 'true');
-                if (colorData.bg) {
-                  cell.style.backgroundColor = colorData.bg;
-                  cell.setAttribute('data-ctc-bg', colorData.bg);
-                }
-                if (colorData.color) {
-                  cell.style.color = colorData.color;
-                  cell.setAttribute('data-ctc-color', colorData.color);
-                }
-              }
-            });
-          });
-          debugLog(`Table ${tableIdx}: colored ${coloredCells} cells`);
-        }
+      const editors = document.querySelectorAll('.cm-content');
+      debugLog(`applyColorsToAllEditors: Found ${editors.length} editors for file: ${file.path}`);
+      
+      editors.forEach(editorEl => {
+        // Get all tables in this editor
+        const editorTables = Array.from(editorEl.querySelectorAll('table'));
+        debugLog(`applyColorsToAllEditors: Found ${editorTables.length} tables in editor`);
+        
+        // Process each table using processSingleTable (which handles clearing internally)
+        editorTables.forEach((table, localIdx) => {
+          const globalTableIndex = allDocTables.indexOf(table);
+          // Use global index if found, otherwise use local index within editor
+          const tableIdx = globalTableIndex >= 0 ? globalTableIndex : localIdx;
+          debugLog(`applyColorsToAllEditors: Processing table ${tableIdx} (global: ${globalTableIndex}, local: ${localIdx})`);
+          this.processSingleTable(table, tableIdx, file.path, noteData);
+        });
       });
     };
 
@@ -240,35 +225,83 @@ module.exports = class TableColorPlugin extends Plugin {
     installEditorObservers();
 
     const setupLivePreviewColoring = () => {
-      // Initial application
-      setTimeout(this.applyColorsToAllEditors, 200);
+      // Initial application - use applyColorsToActiveFile which handles both modes properly
+      setTimeout(() => this.applyColorsToActiveFile(), 200);
       // Observe DOM changes in editors
       if (!this._livePreviewObserver) {
         this._livePreviewObserver = new MutationObserver(() => {
-          this.applyColorsToAllEditors();
+          this.applyColorsToActiveFile();
         });
         document.querySelectorAll('.cm-content').forEach(editorEl => {
           this._livePreviewObserver.observe(editorEl, { childList: true, subtree: true });
         });
       }
       // Re-apply on file open/layout change
-      this.registerEvent(this.app.workspace.on('file-open', this.applyColorsToAllEditors));
-      this.registerEvent(this.app.workspace.on('layout-change', this.applyColorsToAllEditors));
+      this.registerEvent(this.app.workspace.on('file-open', () => this.applyColorsToActiveFile()));
+      this.registerEvent(this.app.workspace.on('layout-change', () => this.applyColorsToActiveFile()));
       // Re-apply on cell focus/blur/input (to persist colors after editing)
       this.registerDomEvent(document, 'focusin', (e) => {
         if (e.target && e.target.closest && e.target.closest('.cm-content table')) {
-          this.applyColorsToAllEditors();
+          this.applyColorsToActiveFile();
         }
       });
       this.registerDomEvent(document, 'input', (e) => {
         if (e.target && e.target.closest && e.target.closest('.cm-content table')) {
-          setTimeout(this.applyColorsToAllEditors, 30);
+          setTimeout(() => this.applyColorsToActiveFile(), 30);
         }
+      });
+      
+      // Watch for style changes on colored cells and restore via fallback mechanism
+      const colorRestorer = new MutationObserver((mutations) => {
+        let needsReapply = false;
+        mutations.forEach(mutation => {
+          if (mutation.target.closest && mutation.target.closest('.cm-content table')) {
+            const cell = mutation.target.closest('td, th');
+            if (cell && cell.hasAttribute('data-ctc-bg')) {
+              // Color was applied before, check if it's still there
+              if (!cell.style.backgroundColor || cell.style.backgroundColor === '') {
+                needsReapply = true;
+              }
+            }
+          }
+        });
+        if (needsReapply) {
+          this.applyColorsToAllEditors();
+        }
+      });
+
+      // Re-apply colors immediately when clicking/selecting table cells
+      // Using single delayed timer since rule-based rendering is more stable
+      this.registerDomEvent(document, 'pointerdown', (e) => {
+        const cell = e.target?.closest && e.target.closest('td, th');
+        const table = e.target?.closest && e.target.closest('.cm-content table');
+        if (cell && table) {
+          // Single reapplication after selection settles
+          setTimeout(() => this.applyColorsToAllEditors(), 10);
+        }
+      });
+
+      // Also watch existing tables for color loss (fallback restoration)
+      this._colorRestorer = colorRestorer;
+      document.querySelectorAll('.cm-content table').forEach(table => {
+        colorRestorer.observe(table, { 
+          attributes: true, 
+          attributeFilter: ['style'], 
+          subtree: true 
+        });
       });
     };
 
     await this.loadSettings();
-    // Setup Live Preview coloring if enabled (after settings loaded)
+    if (typeof this.addStatusBarItem === 'function' && this.settings.showStatusRefreshIcon && !this.statusBarRefresh) {
+      this.createStatusBarIcon();
+    }
+    if (typeof this.addRibbonIcon === 'function' && this.settings.showRibbonRefreshIcon && !this._ribbonRefreshIcon) {
+      const iconEl = this.addRibbonIcon('table', 'Refresh table colors', () => {
+        this.hardRefreshTableColors();
+      });
+      this._ribbonRefreshIcon = iconEl;
+    }
     setupLivePreviewColoring();
     if (this.settings?.persistUndoHistory) {
       await this.loadUndoRedoStacks();
@@ -568,12 +601,8 @@ module.exports = class TableColorPlugin extends Plugin {
             
             if (hasNewTable) {
               debugLog('Global observer: New table detected in reading view, applying colors');
-              // Find all reading views and apply colors
-              document.querySelectorAll('.markdown-preview-view').forEach(view => {
-                if (view.isConnected) {
-                  this.applyColorsToContainer(view, file.path);
-                }
-              });
+              // Use applyColorsToActiveFile which handles both reading and live preview
+              this.applyColorsToActiveFile();
             }
           }
         });
@@ -767,6 +796,72 @@ module.exports = class TableColorPlugin extends Plugin {
     );
   }
 
+  createStatusBarIcon() {
+    if (!this.statusBarRefresh && typeof this.addStatusBarItem === 'function') {
+      const status = this.addStatusBarItem();
+      this.statusBarRefresh = status;
+      setIcon(status, 'table');
+      status.setAttribute('aria-label', 'Refresh Table Colors');
+      status.classList.add('ctc-refresh-table-color');
+      status.style.cursor = 'pointer';
+      status.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.hardRefreshTableColors();
+      });
+      debugLog('[Status Bar] Icon created successfully');
+    }
+  }
+
+  removeStatusBarIcon() {
+    if (this.statusBarRefresh) {
+      try {
+        const container = this.statusBarRefresh.containerEl;
+        if (container) {
+          container.remove();
+        }
+        this.statusBarRefresh = null;
+        debugLog('[Status Bar] Icon removed successfully');
+      } catch (e) {
+        debugWarn('[Status Bar] Error removing icon:', e);
+      }
+    }
+  }
+
+  hardRefreshTableColors() {
+    debugLog('[Hard Refresh] Starting hard refresh of table colors');
+    
+    // STEP 1: Clear all table colors from DOM (both manual and rule-based)
+    document.querySelectorAll('table td, table th').forEach(cell => {
+      cell.style.backgroundColor = '';
+      cell.style.color = '';
+      // Clear data attributes that might cache colors
+      cell.removeAttribute('data-ctc-bg');
+      cell.removeAttribute('data-ctc-color');
+    });
+    
+    // STEP 2: Clear table processing markers to force reprocessing
+    document.querySelectorAll('table').forEach(table => {
+      table.removeAttribute('data-ctc-processed');
+      table.removeAttribute('data-ctc-index');
+      table.removeAttribute('data-ctc-file');
+      table.removeAttribute('data-ctc-last-processed');
+    });
+    
+    // STEP 3: Reset internal cache for DOM tracking
+    this._appliedContainers = new WeakMap();
+    
+    // STEP 4: Reapply all colors from scratch
+    debugLog('[Hard Refresh] Colors cleared, reapplying from scratch');
+    
+    if (typeof this.applyColorsToActiveFile === 'function') {
+      setTimeout(() => {
+        this.applyColorsToActiveFile();
+        debugLog('[Hard Refresh] Hard refresh complete');
+      }, 50);
+    }
+  }
+
   onunload() {
     // Remove our settings tab when the plugin is 
     // disabled/unloaded to avoid duplicate entries
@@ -849,6 +944,14 @@ module.exports = class TableColorPlugin extends Plugin {
       }
     } catch (e) { }
     
+    // Clean up color restorer
+    try {
+      if (this._colorRestorer && typeof this._colorRestorer.disconnect === 'function') {
+        this._colorRestorer.disconnect();
+        this._colorRestorer = null;
+      }
+    } catch (e) { }
+    
     try {
       if (this.settings?.persistUndoHistory) {
         this.saveUndoRedoStacks();
@@ -869,11 +972,13 @@ module.exports = class TableColorPlugin extends Plugin {
       coloringSort: 'lastAdded',
       advancedRules: [],
       numericStrict: true,
-  livePreviewColoring: false,
-  persistUndoHistory: true,
-  recentColors: [],
-  presetColors: [],
-  processAllCellsOnOpen: false // Process all cells when file opens, not just visible ones
+      livePreviewColoring: false,
+      persistUndoHistory: true,
+      recentColors: [],
+      presetColors: [],
+      processAllCellsOnOpen: false, // Process all cells when file opens, not just visible ones
+      showStatusRefreshIcon: false,
+      showRibbonRefreshIcon: false
     }, data?.settings || {});
     if (Array.isArray(this.settings.presetColors)) {
       this.settings.presetColors = this.settings.presetColors.map(pc => {
@@ -1516,15 +1621,21 @@ module.exports = class TableColorPlugin extends Plugin {
   }
 
   async resetCell(cell, tableEl) {
+    // Clear inline styles
     cell.style.backgroundColor = "";
     cell.style.color = "";
+    
+    // Remove data attributes that restore colors
+    cell.removeAttribute('data-ctc-bg');
+    cell.removeAttribute('data-ctc-color');
+    cell.removeAttribute('data-ctc-manual');
 
     const fileId = this.app.workspace.getActiveFile()?.path;
     if (!fileId) return;
 
-  const tableIndex = this.getGlobalTableIndex(tableEl);
-  const rowIndex = Array.from(tableEl.querySelectorAll('tr')).indexOf(cell.closest('tr'));
-  const colIndex = Array.from(cell.closest('tr').querySelectorAll('td, th')).indexOf(cell);
+    const tableIndex = this.getGlobalTableIndex(tableEl);
+    const rowIndex = Array.from(tableEl.querySelectorAll('tr')).indexOf(cell.closest('tr'));
+    const colIndex = Array.from(cell.closest('tr').querySelectorAll('td, th')).indexOf(cell);
 
     const noteData = this.cellData[fileId];
     const tableKey = `table_${tableIndex}`;
@@ -1532,6 +1643,9 @@ module.exports = class TableColorPlugin extends Plugin {
       delete noteData[tableKey][`row_${rowIndex}`][`col_${colIndex}`];
       await this.saveDataColors();
     }
+    
+    // Force refresh to ensure no colors reappear
+    setTimeout(() => this.applyColorsToActiveFile(), 50);
   }
 
   async resetRow(cell, tableEl) {
@@ -1551,12 +1665,23 @@ module.exports = class TableColorPlugin extends Plugin {
     if (!this.cellData[fileId][tableKey]) this.cellData[fileId][tableKey] = {};
     delete this.cellData[fileId][tableKey][rowKey];
 
-    cell.closest('tr')?.querySelectorAll('td, th')?.forEach(td => { td.style.backgroundColor = ""; td.style.color = ""; });
+    // Clear all cells in the row
+    cell.closest('tr')?.querySelectorAll('td, th')?.forEach(td => { 
+      td.style.backgroundColor = ""; 
+      td.style.color = "";
+      // Remove data attributes
+      td.removeAttribute('data-ctc-bg');
+      td.removeAttribute('data-ctc-color');
+      td.removeAttribute('data-ctc-manual');
+    });
 
     const snapshot = this.createSnapshot('row_color', fileId, tableIndex, { row: rowIndex }, oldColors, undefined);
     this.addToUndoStack(snapshot);
 
     await this.saveDataColors();
+    
+    // Force refresh to ensure no colors reappear
+    setTimeout(() => this.applyColorsToActiveFile(), 50);
   }
 
   async resetColumn(cell, tableEl) {
@@ -1580,15 +1705,27 @@ module.exports = class TableColorPlugin extends Plugin {
       }
     });
 
+    // Clear all cells in the column and remove data attributes
     tableEl.querySelectorAll('tr').forEach(tr => {
       const cells = tr.querySelectorAll('td, th');
-      if (colIndex < cells.length) { const c = cells[colIndex]; c.style.backgroundColor = ""; c.style.color = ""; }
+      if (colIndex < cells.length) { 
+        const c = cells[colIndex]; 
+        c.style.backgroundColor = ""; 
+        c.style.color = "";
+        // Remove data attributes
+        c.removeAttribute('data-ctc-bg');
+        c.removeAttribute('data-ctc-color');
+        c.removeAttribute('data-ctc-manual');
+      }
     });
 
     const snapshot = this.createSnapshot('column_color', fileId, tableIndex, { col: colIndex }, oldColors, undefined);
     this.addToUndoStack(snapshot);
 
     await this.saveDataColors();
+    
+    // Force refresh to ensure no colors reappear
+    setTimeout(() => this.applyColorsToActiveFile(), 50);
   }
 
   async loadDataSettings() {
@@ -1604,6 +1741,9 @@ module.exports = class TableColorPlugin extends Plugin {
     // Refresh any visible rendered notes 
     // so rule changes take effect immediately
     this.applyColorsToActiveFile();
+    if (this.settings.livePreviewColoring && typeof this.applyColorsToAllEditors === 'function') {
+      setTimeout(() => this.applyColorsToAllEditors(), 10);
+    }
   }
 
   async saveDataColors() {
@@ -1846,9 +1986,9 @@ module.exports = class TableColorPlugin extends Plugin {
 
     switch (rule.match) {
       case 'is':
-        return t === String(val);
+        return t.toLowerCase() === String(val).toLowerCase();
       case 'isNot':
-        return t !== String(val);
+        return t.toLowerCase() !== String(val).toLowerCase();
       case 'isRegex':
         try {
           const rx = new RegExp(String(val), 'i');
@@ -1924,8 +2064,10 @@ module.exports = class TableColorPlugin extends Plugin {
       const applyCellStyle = (cell) => {
         if (!cell) return;
         if (cell.hasAttribute('data-ctc-manual')) return;
-        // Also check if cell already has colors from manual application
-        if (cell.style.backgroundColor || cell.style.color) return;
+        // For header cells (th), allow overriding existing colors from rules
+        // For data cells (td), check if they already have colors
+        const isHeaderCell = cell.tagName === 'TH';
+        if (!isHeaderCell && (cell.style.backgroundColor || cell.style.color)) return;
         if (rule.bg) cell.style.backgroundColor = rule.bg;
         if (rule.color) cell.style.color = rule.color;
       };
@@ -2001,7 +2143,13 @@ module.exports = class TableColorPlugin extends Plugin {
       if (!conditions.length) continue;
 
       if (target === 'row') {
-        const candidateRows = rule.when === 'firstRow' ? [fdr] : Array.from({ length: rows.length }, (_, i) => i);
+        const hasHeaderConds = conditions.some(cond => cond.when === 'columnHeader');
+        const allHeaderConds = conditions.length > 0 && conditions.every(cond => cond.when === 'columnHeader');
+        let candidateRows = rule.when === 'firstRow' ? [fdr] : Array.from({ length: rows.length }, (_, i) => i);
+        if (allHeaderConds) {
+          candidateRows = [hdr];
+          debugLog(`Row target uses only columnHeader conditions; coloring header row index ${hdr}`);
+        }
         for (const r of candidateRows) {
           const flags = conditions.map(cond => {
             if (cond.when === 'columnHeader') {
@@ -2023,8 +2171,17 @@ module.exports = class TableColorPlugin extends Plugin {
           if (logic === 'all') ok = flags.every(Boolean);
           else if (logic === 'none') ok = flags.every(f => !f);
           else ok = flags.some(Boolean);
+          debugLog(`Row ${r}: flags=${JSON.stringify(flags)}, logic=${logic}, ok=${ok}, bg=${bg}, color=${color}`);
           if (ok) {
-            Array.from(rows[r].querySelectorAll('td, th')).forEach(cell => { if (cell.hasAttribute('data-ctc-manual') || cell.style.backgroundColor || cell.style.color) return; if (bg) cell.style.backgroundColor = bg; if (color) cell.style.color = color; });
+            debugLog(`  -> Coloring row ${r} with bg=${bg} color=${color}`);
+            Array.from(rows[r].querySelectorAll('td, th')).forEach(cell => { 
+              if (cell.hasAttribute('data-ctc-manual')) return;
+              // For header cells, allow overriding; for data cells, skip if already colored
+              const isHeaderCell = cell.tagName === 'TH';
+              if (!isHeaderCell && (cell.style.backgroundColor || cell.style.color)) return;
+              if (bg) cell.style.backgroundColor = bg; 
+              if (color) cell.style.color = color; 
+            });
           }
         }
       } else if (target === 'column') {
@@ -2177,17 +2334,19 @@ module.exports = class TableColorPlugin extends Plugin {
     debugLog(`All tables in document: ${allTables.length}, container tables: ${tables.length}, inPreview: ${inPreview}, inEditor: ${inEditor}`);
 
     // Process each table
+    let manualAppliedCount = 0;
     tables.forEach((tableEl) => {
       const globalTableIndex = allTables.indexOf(tableEl);
       if (globalTableIndex === -1) {
         debugWarn(`Could not find table in global list, using local index`);
         const containerTables = Array.from(container.querySelectorAll('table'));
         const fallbackIndex = containerTables.indexOf(tableEl);
-        this.processSingleTable(tableEl, fallbackIndex, filePath, noteData);
+        manualAppliedCount += this.processSingleTable(tableEl, fallbackIndex, filePath, noteData) || 0;
       } else {
-        this.processSingleTable(tableEl, globalTableIndex, filePath, noteData);
+        manualAppliedCount += this.processSingleTable(tableEl, globalTableIndex, filePath, noteData) || 0;
       }
     });
+    debugLog(`applyColorsToContainer: manual colors applied to ${manualAppliedCount} cells in this container`);
     // In Reading mode, retry applying colors with escalating delays if needed
     try {
       const prev = this._appliedContainers.get(container) || 0;
@@ -2211,45 +2370,119 @@ module.exports = class TableColorPlugin extends Plugin {
       return;
     }
     
-    // Apply to reading preview - IMMEDIATELY pre-render ALL tables with both manual and rule colors
-    const previewViews = document.querySelectorAll('.markdown-preview-view');
     const noteData = this.cellData[file.path] || {};
+    debugLog(`applyColorsToActiveFile: file=${file.path}, has noteData keys:`, Object.keys(noteData));
+    
+    // Restrict reading mode application to views showing the active file
+    let previewViews = [];
+    try {
+      const leaves = typeof this.app.workspace.getLeavesOfType === 'function' ? this.app.workspace.getLeavesOfType('markdown') : [];
+      const activeContainers = leaves
+        .filter(l => l.view && l.view.file && l.view.file.path === file.path)
+        .map(l => l.view && (l.view.containerEl || l.view.contentEl))
+        .filter(Boolean);
+      activeContainers.forEach(container => {
+        const views = Array.from(container.querySelectorAll('.markdown-preview-view'));
+        previewViews.push(...views);
+      });
+    } catch (e) {
+      previewViews = Array.from(document.querySelectorAll('.markdown-preview-view'));
+    }
+    debugLog(`applyColorsToActiveFile: found ${previewViews.length} preview views for active file`);
+    
+    // Use GLOBAL table index consistently across saving and applying
     const allDocTables = Array.from(document.querySelectorAll('table'));
     
-    debugLog(`applyColorsToActiveFile: file=${file.path}, found ${previewViews.length} preview views, cellData has keys:`, Object.keys(noteData));
+    // If no tables found yet, retry shortly
+    if (previewViews.length > 0) {
+      const totalTables = previewViews.reduce((acc, v) => acc + v.querySelectorAll('table').length, 0);
+      if (totalTables === 0) {
+        debugLog('No reading mode tables found in active views, retrying after 100ms');
+        setTimeout(() => this.applyColorsToActiveFile(), 100);
+        return;
+      }
+    }
     
+    // Clear all rule-based colors first (in both reading and live preview)
+    // This ensures rule color changes take effect
+    previewViews.forEach(view => {
+      view.querySelectorAll('td, th').forEach(cell => {
+        if (!cell.hasAttribute('data-ctc-manual')) {
+          cell.style.backgroundColor = '';
+          cell.style.color = '';
+        }
+      });
+    });
+    
+    if (this.settings.livePreviewColoring) {
+      document.querySelectorAll('.cm-content table td, .cm-content table th').forEach(cell => {
+        if (!cell.hasAttribute('data-ctc-manual')) {
+          cell.style.backgroundColor = '';
+          cell.style.color = '';
+        }
+      });
+    }
+    
+    // Apply to reading mode using global indices
     previewViews.forEach(view => {
       if (view.isConnected) {
-        // Get ALL tables in the reading view
-        const allTables = Array.from(view.querySelectorAll('table'));
-        debugLog(`applyColorsToActiveFile: Found ${allTables.length} tables in reading view`);
-        
-        // IMMEDIATELY process every single table without waiting
-        // processSingleTable will apply both manual colors AND rules
-        allTables.forEach((table) => {
-          const globalTableIdx = allDocTables.indexOf(table);
-          if (globalTableIdx >= 0) {
-            debugLog(`Processing table ${globalTableIdx} in reading mode with noteData:`, Object.keys(noteData).includes(`table_${globalTableIdx}`));
-            this.processSingleTable(table, globalTableIdx, file.path, noteData);
+        const viewTables = Array.from(view.querySelectorAll('table'));
+        let readingManualApplied = 0;
+        viewTables.forEach((table) => {
+          const globalIdx = allDocTables.indexOf(table);
+          if (globalIdx >= 0) {
+            readingManualApplied += this.processSingleTable(table, globalIdx, file.path, noteData) || 0;
           }
         });
-        // Don't call applyColorsToContainer after processSingleTable - it's redundant
+        debugLog(`Reading mode: manual colors applied to ${readingManualApplied} cells in this view`);
       }
     });
     
-    // Apply to live preview if enabled
+    // Apply to live preview if enabled - use simple global indexing for consistency
     if (this.settings.livePreviewColoring) {
       const cmEditors = document.querySelectorAll('.cm-content');
-      cmEditors.forEach(editor => {
+      debugLog(`applyColorsToActiveFile: Found ${cmEditors.length} live preview editors`);
+      
+      cmEditors.forEach((editor, editorIdx) => {
         if (editor.isConnected) {
-          this.applyColorsToContainer(editor, file.path);
+          const editorTables = Array.from(editor.querySelectorAll('table'));
+          debugLog(`  Editor ${editorIdx}: ${editorTables.length} tables`);
+          let editorManualApplied = 0;
+          editorTables.forEach((table, localIdx) => {
+            const globalIdx = allDocTables.indexOf(table);
+            if (globalIdx >= 0) {
+              editorManualApplied += this.processSingleTable(table, globalIdx, file.path, noteData) || 0;
+            }
+          });
+          debugLog(`  Editor ${editorIdx}: manual colors applied to ${editorManualApplied} cells`);
         }
       });
     }
   }
 
+  // Get a signature for a table based on its structure (row/col count)
+  getTableSignature(table) {
+    const rows = table.querySelectorAll('tr').length;
+    const cols = table.querySelector('tr') ? table.querySelector('tr').querySelectorAll('td, th').length : 0;
+    return `${rows}x${cols}`;
+  }
+
+  // Get table text content for matching tables between reading and live preview modes
+  getTableTextContent(table) {
+    const rows = Array.from(table.querySelectorAll('tr'));
+    const text = rows.map(row => {
+      const cells = Array.from(row.querySelectorAll('td, th'));
+      return cells.map(cell => this.getCellText(cell).trim()).join('|');
+    }).join('\n');
+    debugLog(`  getTableTextContent: ${rows.length} rows, content hash: ${text.substring(0, 100)}`);
+    return text;
+  }
+
   processSingleTable(tableEl, tableIndex, filePath, noteData) {
     debugLog(`Processing single table: index=${tableIndex}, has data-ctc-index: ${tableEl.getAttribute('data-ctc-index')}`);
+    const inLivePreview = !!tableEl.closest('.cm-content');
+    const inReadingMode = !!tableEl.closest('.markdown-preview-view');
+    debugLog(`Table context: ${inLivePreview ? 'LivePreview' : (inReadingMode ? 'Reading' : 'Unknown')}`);
     
     // Mark table with unique data attribute for persistence
     if (!tableEl.hasAttribute('data-ctc-processed')) {
@@ -2267,6 +2500,8 @@ module.exports = class TableColorPlugin extends Plugin {
     const tableId = `${filePath}:${tableIndex}`;
     const manualColoredCells = new Set(); // Track which cells have manual colors
     
+    // NOTE: Clearing is now done in applyColorsToActiveFile before this function is called
+    // STEP 1: Apply manual colors using rule-based rendering (direct style application)
     Array.from(tableEl.querySelectorAll('tr')).forEach((tr, rIdx) => {
       const rowKey = `row_${rIdx}`;
       const rowColors = tableColors[rowKey] || {};
@@ -2276,15 +2511,25 @@ module.exports = class TableColorPlugin extends Plugin {
         const colorData = rowColors[`col_${cIdx}`];
         if (colorData) {
           coloredCount++;
-          manualColoredCells.add(cell); // Mark this cell as manually colored
+          manualColoredCells.add(cell);
+          
+          // Apply colors directly using rule-based approach (primary method)
           if (colorData.bg) {
             cell.style.backgroundColor = colorData.bg;
-            cell.setAttribute('data-ctc-bg', colorData.bg);
           }
           if (colorData.color) {
             cell.style.color = colorData.color;
+          }
+          
+          // Store attributes as fallback for restoring colors if styles are cleared
+          if (colorData.bg) {
+            cell.setAttribute('data-ctc-bg', colorData.bg);
+          }
+          if (colorData.color) {
             cell.setAttribute('data-ctc-color', colorData.color);
           }
+          
+          // Mark as manual so rules skip it
           cell.setAttribute('data-ctc-manual', 'true');
           cell.setAttribute('data-ctc-table-id', tableId);
           cell.setAttribute('data-ctc-row', String(rIdx));
@@ -2295,18 +2540,20 @@ module.exports = class TableColorPlugin extends Plugin {
     
     debugLog(`Table index ${tableIndex}: colored ${coloredCount} cells with manual colors`);
     
-    // Apply rules after manual; rule methods will skip cells marked as manual
+    // STEP 2: Apply rules after manual; rule methods will skip cells marked as manual
     this.applyColoringRulesToTable(tableEl);
     this.applyAdvancedRulesToTable(tableEl);
     
-    // CRITICAL: Re-enforce manual colors after rules (to ensure rules didn't override)
+    // STEP 3: Fallback restoration - re-enforce manual colors if rules or selection cleared them
+    // This is now only a safety net, not the primary method
     manualColoredCells.forEach(cell => {
       const bg = cell.getAttribute('data-ctc-bg');
       const color = cell.getAttribute('data-ctc-color');
-      if (bg && cell.style.backgroundColor !== bg) {
+      // Only restore if styles were unexpectedly cleared (fallback behavior)
+      if (bg && !cell.style.backgroundColor) {
         cell.style.backgroundColor = bg;
       }
-      if (color && cell.style.color !== color) {
+      if (color && !cell.style.color) {
         cell.style.color = color;
       }
     });
@@ -2373,26 +2620,36 @@ module.exports = class TableColorPlugin extends Plugin {
       const file = this.app.workspace.getActiveFile();
       if (!file) return;
       
-      // Only run if we're in reading mode
-      const readingViews = document.querySelectorAll('.markdown-preview-view');
-      if (readingViews.length === 0) return;
+      // Restrict to reading views of the active file
+      let previewViews = [];
+      try {
+        const leaves = typeof this.app.workspace.getLeavesOfType === 'function' ? this.app.workspace.getLeavesOfType('markdown') : [];
+        const activeContainers = leaves
+          .filter(l => l.view && l.view.file && l.view.file.path === file.path)
+          .map(l => l.view && (l.view.containerEl || l.view.contentEl))
+          .filter(Boolean);
+        activeContainers.forEach(container => {
+          const views = Array.from(container.querySelectorAll('.markdown-preview-view'));
+          previewViews.push(...views);
+        });
+      } catch (e) {
+        previewViews = Array.from(document.querySelectorAll('.markdown-preview-view'));
+      }
+      if (previewViews.length === 0) return;
       
-      // Proactively color ALL tables in each reading view
-      readingViews.forEach(view => {
-        const allTables = Array.from(view.querySelectorAll('table'));
-        const noteData = this.cellData[file.path] || {};
-        const allDocTables = Array.from(document.querySelectorAll('table'));
-        
-        allTables.forEach(table => {
-          // Color all tables immediately, don't wait for them to be scrolled into view
+      const noteData = this.cellData[file.path] || {};
+      const allDocTables = Array.from(document.querySelectorAll('table'));
+      
+      previewViews.forEach(view => {
+        const viewTables = Array.from(view.querySelectorAll('table'));
+        viewTables.forEach(table => {
           if (!table.hasAttribute('data-ctc-processed')) {
             const globalTableIdx = allDocTables.indexOf(table);
             this.processSingleTable(table, globalTableIdx, file.path, noteData);
           }
         });
-        
-        // Also ensure rules are applied to all tables
-        allTables.forEach(table => {
+        // Ensure rules are applied to all tables in this view
+        viewTables.forEach(table => {
           this.applyColoringRulesToTable(table);
           this.applyAdvancedRulesToTable(table);
         });
@@ -2780,6 +3037,45 @@ class ColorTableSettingTab extends PluginSettingTab {
               await this.plugin.saveSettings();
             }));
 
+  new Setting(containerEl)
+    .setName("Show Refresh Icon in Status Bar")
+    .setDesc("Toggle refresh table icon in the status bar")
+    .addToggle(toggle =>
+      toggle.setValue(this.plugin.settings.showStatusRefreshIcon)
+            .onChange(async val => {
+              this.plugin.settings.showStatusRefreshIcon = val;
+              await this.plugin.saveSettings();
+              if (val) {
+                this.plugin.createStatusBarIcon();
+              } else {
+                this.plugin.removeStatusBarIcon();
+              }
+            }));
+
+  new Setting(containerEl)
+    .setName("Show Refresh Icon in Ribbon")
+    .setDesc("Toggle refresh table icon in the left ribbon")
+    .addToggle(toggle =>
+      toggle.setValue(this.plugin.settings.showRibbonRefreshIcon)
+            .onChange(async val => {
+              this.plugin.settings.showRibbonRefreshIcon = val;
+              await this.plugin.saveSettings();
+              try {
+                if (val && !this.plugin._ribbonRefreshIcon && typeof this.plugin.addRibbonIcon === 'function') {
+                  const iconEl = this.plugin.addRibbonIcon('table', 'Refresh table colors', () => {
+                    document.querySelectorAll('.markdown-preview-view table td, .markdown-preview-view table th').forEach(cell => { cell.style.backgroundColor = ''; cell.style.color = ''; });
+                    this.plugin.applyColorsToActiveFile();
+                    document.querySelectorAll('.cm-content table td, .cm-content table th').forEach(cell => { cell.style.backgroundColor = ''; cell.style.color = ''; });
+                    if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') { setTimeout(() => this.plugin.applyColorsToAllEditors(), 10); }
+                  });
+                  this.plugin._ribbonRefreshIcon = iconEl;
+                } else if (!val && this.plugin._ribbonRefreshIcon) {
+                  try { this.plugin._ribbonRefreshIcon.remove(); } catch (e) {}
+                  this.plugin._ribbonRefreshIcon = null;
+                }
+              } catch (e) {}
+            }));
+
 
     // Coloring Rules
     containerEl.createEl('h3', { text: 'Coloring Rules' });
@@ -2876,21 +3172,23 @@ class ColorTableSettingTab extends PluginSettingTab {
       }
       rules.forEach((rule, idx) => {
         const row = rulesContainer.createDiv({ cls: 'cr-rule-row pretty-flex' });
+        const originalIdx = this.plugin.settings.coloringRules.indexOf(rule);
+        row.dataset.idx = String(originalIdx);
 
         const targetSel = row.createEl('select', { cls: 'cr-select' });
         const tPh = targetSel.createEl('option', { text: 'TARGET', value: '' }); tPh.disabled = true; tPh.selected = !rule.target;
         TARGET_OPTIONS.forEach(opt => { const o = targetSel.createEl('option'); o.value = opt.value; o.text = opt.label; if (rule.target === opt.value) o.selected = true; });
-        targetSel.addEventListener('change', async () => { rule.target = targetSel.value; await this.plugin.saveSettings(); });
+        targetSel.addEventListener('change', async () => { rule.target = targetSel.value; await this.plugin.saveSettings(); this.plugin.applyColorsToActiveFile(); if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') setTimeout(() => this.plugin.applyColorsToAllEditors(), 10); });
 
         const whenSel = row.createEl('select', { cls: 'cr-select' });
         const wPh = whenSel.createEl('option', { text: 'WHEN', value: '' }); wPh.disabled = true; wPh.selected = !rule.when;
         WHEN_OPTIONS.forEach(opt => { const o = whenSel.createEl('option'); o.value = opt.value; o.text = opt.label; if (rule.when === opt.value) o.selected = true; });
-        whenSel.addEventListener('change', async () => { rule.when = whenSel.value; await this.plugin.saveSettings(); });
+        whenSel.addEventListener('change', async () => { rule.when = whenSel.value; await this.plugin.saveSettings(); this.plugin.applyColorsToActiveFile(); if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') setTimeout(() => this.plugin.applyColorsToAllEditors(), 10); });
 
         const matchSel = row.createEl('select', { cls: 'cr-select' });
         const mPh = matchSel.createEl('option', { text: 'MATCH', value: '' }); mPh.disabled = true; mPh.selected = !rule.match;
         MATCH_OPTIONS.forEach(opt => { const o = matchSel.createEl('option'); o.value = opt.value; o.text = opt.label; if (rule.match === opt.value) o.selected = true; });
-        matchSel.addEventListener('change', async () => { rule.match = matchSel.value; await this.plugin.saveSettings(); renderRules(); });
+        matchSel.addEventListener('change', async () => { rule.match = matchSel.value; await this.plugin.saveSettings(); this.plugin.applyColorsToActiveFile(); if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') setTimeout(() => this.plugin.applyColorsToAllEditors(), 10); renderRules(); });
 
         const numericMatches = new Set(['eq','gt','lt','ge','le']);
         const valueInput = row.createEl('input', { type: numericMatches.has(rule.match) ? 'number' : 'text', cls: 'cr-value-input' });
@@ -2900,17 +3198,19 @@ class ColorTableSettingTab extends PluginSettingTab {
           const v = valueInput.value;
           rule.value = numericMatches.has(rule.match) ? (v === '' ? null : Number(v)) : v;
           await this.plugin.saveSettings();
+          this.plugin.applyColorsToActiveFile();
+          if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') setTimeout(() => this.plugin.applyColorsToAllEditors(), 10);
         });
 
         const colorPicker = row.createEl('input', { type: 'color', cls: 'cr-color-picker' });
         if (rule.color) colorPicker.value = rule.color; else colorPicker.value = '#000000';
         colorPicker.title = 'Text Color';
-        colorPicker.addEventListener('change', async () => { rule.color = colorPicker.value; await this.plugin.saveSettings(); });
+        colorPicker.addEventListener('change', async () => { rule.color = colorPicker.value; await this.plugin.saveSettings(); this.plugin.applyColorsToActiveFile(); if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') setTimeout(() => this.plugin.applyColorsToAllEditors(), 10); });
 
         const bgPicker = row.createEl('input', { type: 'color', cls: 'cr-bg-picker' });
         if (rule.bg) bgPicker.value = rule.bg; else bgPicker.value = '#000000';
         bgPicker.title = 'Background Color';
-        bgPicker.addEventListener('change', async () => { rule.bg = bgPicker.value; await this.plugin.saveSettings(); });
+        bgPicker.addEventListener('change', async () => { rule.bg = bgPicker.value; await this.plugin.saveSettings(); this.plugin.applyColorsToActiveFile(); if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') setTimeout(() => this.plugin.applyColorsToAllEditors(), 10); });
 
         const delBtn = row.createEl('button', { cls: 'mod-ghost cr-del-btn' });
         if (typeof window.setIcon === 'function') {
@@ -2921,9 +3221,90 @@ class ColorTableSettingTab extends PluginSettingTab {
           delBtn.textContent = '×';
         }
         delBtn.addEventListener('click', async () => {
-          this.plugin.settings.coloringRules.splice(idx, 1);
-          await this.plugin.saveSettings();
-          renderRules();
+          const oi = this.plugin.settings.coloringRules.indexOf(rule);
+          if (oi >= 0) {
+            this.plugin.settings.coloringRules.splice(oi, 1);
+            await this.plugin.saveSettings();
+            this.plugin.applyColorsToActiveFile();
+            renderRules();
+          }
+        });
+
+        row.addEventListener('contextmenu', (evt) => {
+          const menu = new Menu();
+          menu.addItem(item =>
+            item.setTitle('Duplicate rule')
+                .setIcon('copy')
+                .onClick(async () => {
+                  const oi = this.plugin.settings.coloringRules.indexOf(rule);
+                  if (oi >= 0) {
+                    const clone = JSON.parse(JSON.stringify(rule));
+                    this.plugin.settings.coloringRules.splice(oi + 1, 0, clone);
+                    await this.plugin.saveSettings();
+                    this.plugin.applyColorsToActiveFile();
+                    renderRules();
+                  }
+                })
+          );
+          const canMoveUp = originalIdx > 0;
+          const canMoveDown = originalIdx >= 0 && originalIdx < (this.plugin.settings.coloringRules.length - 1);
+          menu.addItem(item =>
+            item.setTitle('Move rule up')
+                .setIcon('arrow-up')
+                .setDisabled(!canMoveUp)
+                .onClick(async () => {
+                  const oi = this.plugin.settings.coloringRules.indexOf(rule);
+                  if (oi > 0) {
+                    const list = this.plugin.settings.coloringRules;
+                    [list[oi - 1], list[oi]] = [list[oi], list[oi - 1]];
+                    await this.plugin.saveSettings();
+                    this.plugin.applyColorsToActiveFile();
+                    renderRules();
+                  }
+                })
+          );
+          menu.addItem(item =>
+            item.setTitle('Move rule down')
+                .setIcon('arrow-down')
+                .setDisabled(!canMoveDown)
+                .onClick(async () => {
+                  const oi = this.plugin.settings.coloringRules.indexOf(rule);
+                  const list = this.plugin.settings.coloringRules;
+                  if (oi >= 0 && oi < list.length - 1) {
+                    [list[oi], list[oi + 1]] = [list[oi + 1], list[oi]];
+                    await this.plugin.saveSettings();
+                    this.plugin.applyColorsToActiveFile();
+                    renderRules();
+                  }
+                })
+          );
+          menu.addSeparator();
+          menu.addItem(item =>
+            item.setTitle('Reset text color')
+                .setIcon('text')
+                .onClick(async () => {
+                  rule.color = null;
+                  await this.plugin.saveSettings();
+                  this.plugin.applyColorsToActiveFile();
+                  renderRules();
+                })
+          );
+          menu.addItem(item =>
+            item.setTitle('Reset background color')
+                .setIcon('droplet')
+                .onClick(async () => {
+                  rule.bg = null;
+                  await this.plugin.saveSettings();
+                  this.plugin.applyColorsToActiveFile();
+                  renderRules();
+                })
+          );
+          try {
+            if (menu.containerEl && menu.containerEl.classList) menu.containerEl.classList.add('mod-shadow');
+            if (menu.menuEl && menu.menuEl.classList) menu.menuEl.classList.add('mod-shadow');
+          } catch (e) { }
+          menu.showAtMouseEvent(evt);
+          evt.preventDefault();
         });
       });
     };
@@ -2938,7 +3319,7 @@ class ColorTableSettingTab extends PluginSettingTab {
       { label: 'Sort: Mode', value: 'mode' }
     ];
     sortOptions.forEach(opt => { const o = sortSel.createEl('option'); o.text = opt.label; o.value = opt.value; if (opt.value === (this.plugin.settings.coloringSort||'lastAdded')) o.selected = true; });
-    sortSel.addEventListener('change', async () => { this.plugin.settings.coloringSort = sortSel.value; await this.plugin.saveSettings(); renderRules(); });
+    sortSel.addEventListener('change', async () => { this.plugin.settings.coloringSort = sortSel.value; await this.plugin.saveSettings(); this.plugin.applyColorsToActiveFile(); if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') setTimeout(() => this.plugin.applyColorsToAllEditors(), 10); renderRules(); });
 
     const addBtn = addRow.createEl('button', { cls: 'mod-cta cr-add-flex' });
     addBtn.textContent = '+ Add Rule';
@@ -2946,6 +3327,8 @@ class ColorTableSettingTab extends PluginSettingTab {
       if (!Array.isArray(this.plugin.settings.coloringRules)) this.plugin.settings.coloringRules = [];
       this.plugin.settings.coloringRules.push({ target: '', when: '', match: '', value: null, color: null, bg: null });
       await this.plugin.saveSettings();
+      this.plugin.applyColorsToActiveFile();
+      if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') setTimeout(() => this.plugin.applyColorsToAllEditors(), 10);
       renderRules();
     });
 
@@ -3118,13 +3501,14 @@ class ColorTableSettingTab extends PluginSettingTab {
 
     // Delete manual coloring entries
     containerEl.createEl('h3', { text: 'Danger Zone', cls: 'cr-danger-heading' });
-    const deleteManualRow = containerEl.createDiv({ cls: 'cr-delete-row pretty-flex' });
+    const dangerZoneRow = containerEl.createDiv({ cls: 'cr-delete-container' });
+    const deleteManualRow = dangerZoneRow.createDiv({ cls: 'cr-delete-row' });
     const deleteManualBtn = deleteManualRow.createEl('button', { text: 'Delete All Manual Colors', cls: 'mod-warning' });
     deleteManualBtn.addEventListener('click', () => {
       const modal = new Modal(this.app);
       modal.contentEl.createEl('h2', { text: 'Delete All Manual Colors?' });
       modal.contentEl.createEl('p', { text: 'This will remove all manually colored cells (non-rule colors). This action cannot be undone.' });
-      const btnRow = modal.contentEl.createDiv({ cls: 'pretty-flex' });
+      const btnRow = modal.contentEl.createDiv({ cls: 'modal-delete-buttons' });
       const cancelBtn = btnRow.createEl('button', { text: 'Cancel', cls: 'mod-ghost' });
       const confirmBtn = btnRow.createEl('button', { text: 'Delete All', cls: 'mod-warning' });
       cancelBtn.addEventListener('click', () => modal.close());
@@ -3139,13 +3523,13 @@ class ColorTableSettingTab extends PluginSettingTab {
     });
 
     // Delete coloring rules
-    const deleteRulesRow = containerEl.createDiv({ cls: 'cr-delete-row pretty-flex' });
+    const deleteRulesRow = dangerZoneRow.createDiv({ cls: 'cr-delete-row' });
     const deleteRulesBtn = deleteRulesRow.createEl('button', { text: 'Delete All Coloring Rules', cls: 'mod-warning' });
     deleteRulesBtn.addEventListener('click', () => {
       const modal = new Modal(this.app);
       modal.contentEl.createEl('h2', { text: 'Delete All Coloring Rules?' });
       modal.contentEl.createEl('p', { text: `This will remove all ${Array.isArray(this.plugin.settings.coloringRules) ? this.plugin.settings.coloringRules.length : 0} coloring rules. This action cannot be undone.` });
-      const btnRow = modal.contentEl.createDiv({ cls: 'pretty-flex' });
+      const btnRow = modal.contentEl.createDiv({ cls: 'modal-delete-buttons' });
       const cancelBtn = btnRow.createEl('button', { text: 'Cancel', cls: 'mod-ghost' });
       const confirmBtn = btnRow.createEl('button', { text: 'Delete All', cls: 'mod-warning' });
       cancelBtn.addEventListener('click', () => modal.close());
@@ -3161,13 +3545,13 @@ class ColorTableSettingTab extends PluginSettingTab {
     });
 
     // Delete advanced rules
-    const deleteAdvRulesRow = containerEl.createDiv({ cls: 'cr-delete-row pretty-flex' });
+    const deleteAdvRulesRow = dangerZoneRow.createDiv({ cls: 'cr-delete-row' });
     const deleteAdvRulesBtn = deleteAdvRulesRow.createEl('button', { text: 'Delete All Advanced Rules', cls: 'mod-warning' });
     deleteAdvRulesBtn.addEventListener('click', () => {
       const modal = new Modal(this.app);
       modal.contentEl.createEl('h2', { text: 'Delete All Advanced Rules?' });
       modal.contentEl.createEl('p', { text: `This will remove all ${Array.isArray(this.plugin.settings.advancedRules) ? this.plugin.settings.advancedRules.length : 0} advanced rules. This action cannot be undone.` });
-      const btnRow = modal.contentEl.createDiv({ cls: 'pretty-flex' });
+      const btnRow = modal.contentEl.createDiv({ cls: 'modal-delete-buttons' });
       const cancelBtn = btnRow.createEl('button', { text: 'Cancel', cls: 'mod-ghost' });
       const confirmBtn = btnRow.createEl('button', { text: 'Delete All', cls: 'mod-warning' });
       cancelBtn.addEventListener('click', () => modal.close());
@@ -3175,12 +3559,38 @@ class ColorTableSettingTab extends PluginSettingTab {
         this.plugin.settings.advancedRules = [];
         await this.plugin.saveSettings();
         this.plugin.applyColorsToActiveFile();
+        if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') setTimeout(() => this.plugin.applyColorsToAllEditors(), 10);
         new Notice('All advanced rules deleted');
         modal.close();
         this.display();
       });
       modal.open();
     });
+  }
+
+  hide() {
+    // Force refresh table colors when closing settings tab
+    // Clear all rule-based colors first to ensure changes take effect
+    document.querySelectorAll('.markdown-preview-view table td, .markdown-preview-view table th').forEach(cell => {
+      if (!cell.hasAttribute('data-ctc-manual')) {
+        cell.style.backgroundColor = '';
+        cell.style.color = '';
+      }
+    });
+    document.querySelectorAll('.cm-content table td, .cm-content table th').forEach(cell => {
+      if (!cell.hasAttribute('data-ctc-manual')) {
+        cell.style.backgroundColor = '';
+        cell.style.color = '';
+      }
+    });
+    
+    // Now reapply colors with rule changes
+    if (typeof this.plugin.applyColorsToActiveFile === 'function') {
+      setTimeout(() => this.plugin.applyColorsToActiveFile(), 50);
+    }
+    if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') {
+      setTimeout(() => this.plugin.applyColorsToAllEditors(), 100);
+    }
   }
 }
 
@@ -3208,7 +3618,7 @@ class AdvancedRuleModal extends Modal {
         b.classList.remove('mod-ghost');
       };
       if (rule.logic === val) applyActive();
-      b.addEventListener('click', async () => { rule.logic = val; await this.plugin.saveSettings(); applyActive(); });
+      b.addEventListener('click', async () => { rule.logic = val; await this.plugin.saveSettings(); this.plugin.applyColorsToActiveFile(); if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') setTimeout(() => this.plugin.applyColorsToAllEditors(), 10); applyActive(); });
       return b;
     };
     mkBtn('ANY','any'); mkBtn('ALL','all'); mkBtn('NONE','none');
@@ -3250,14 +3660,14 @@ class AdvancedRuleModal extends Modal {
         const row = condsWrap.createDiv({ cls: 'cr-adv-cond-row pretty-flex' });
         const whenSel = row.createEl('select', { cls: 'cr-select cr-adv-cond-when' });
         WHEN_OPTIONS.forEach(opt => { const o = whenSel.createEl('option'); o.value = opt.value; o.text = opt.label; if (cond.when===opt.value) o.selected=true; });
-        whenSel.addEventListener('change', async () => { cond.when = whenSel.value; await this.plugin.saveSettings(); });
+        whenSel.addEventListener('change', async () => { cond.when = whenSel.value; await this.plugin.saveSettings(); this.plugin.applyColorsToActiveFile(); if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') setTimeout(() => this.plugin.applyColorsToAllEditors(), 10); });
         const matchSel = row.createEl('select', { cls: 'cr-select cr-adv-cond-match' });
         MATCH_OPTIONS.forEach(opt => { const o = matchSel.createEl('option'); o.value = opt.value; o.text = opt.label; if (cond.match===opt.value) o.selected=true; });
-        matchSel.addEventListener('change', async () => { cond.match = matchSel.value; await this.plugin.saveSettings(); const isNum = ['eq','gt','lt','ge','le'].includes(cond.match); valInput.type = isNum ? 'number' : 'text'; });
+        matchSel.addEventListener('change', async () => { cond.match = matchSel.value; await this.plugin.saveSettings(); this.plugin.applyColorsToActiveFile(); if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') setTimeout(() => this.plugin.applyColorsToAllEditors(), 10); const isNum = ['eq','gt','lt','ge','le'].includes(cond.match); valInput.type = isNum ? 'number' : 'text'; });
         const isNum = ['eq','gt','lt','ge','le'].includes(cond.match);
         const valInput = row.createEl('input', { type: isNum ? 'number' : 'text', cls: 'cr-value-input cr-adv-cond-value' });
         if (cond.value != null) valInput.value = String(cond.value);
-        valInput.addEventListener('change', async () => { const v = valInput.value; cond.value = isNum ? (v === '' ? null : Number(v)) : v; await this.plugin.saveSettings(); });
+        valInput.addEventListener('change', async () => { const v = valInput.value; cond.value = isNum ? (v === '' ? null : Number(v)) : v; await this.plugin.saveSettings(); this.plugin.applyColorsToActiveFile(); if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') setTimeout(() => this.plugin.applyColorsToAllEditors(), 10); });
 
         // Add per-condition delete button (X)
         const delBtn = row.createEl('button', { cls: 'mod-ghost cr-adv-cond-del' });
@@ -3266,6 +3676,8 @@ class AdvancedRuleModal extends Modal {
           if (Array.isArray(rule.conditions)) {
             rule.conditions.splice(ci, 1);
             await this.plugin.saveSettings();
+            this.plugin.applyColorsToActiveFile();
+            if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') setTimeout(() => this.plugin.applyColorsToAllEditors(), 10);
             renderConds();
           }
         });
@@ -3279,6 +3691,8 @@ class AdvancedRuleModal extends Modal {
       if (!Array.isArray(rule.conditions)) rule.conditions = [];
       rule.conditions.push({ when:'anyCell', match:'contains', value:'' });
       await this.plugin.saveSettings();
+      this.plugin.applyColorsToActiveFile();
+      if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') setTimeout(() => this.plugin.applyColorsToAllEditors(), 10);
       renderConds();
     });
     
@@ -3287,15 +3701,29 @@ class AdvancedRuleModal extends Modal {
     const colorRow = contentEl.createDiv({ cls: 'cr-adv-color-row pretty-flex' });
     const targetSel = colorRow.createEl('select', { cls: 'cr-select cr-adv-target' });
     TARGET_OPTIONS.forEach(opt => { const o = targetSel.createEl('option'); o.value = opt.value; o.text = opt.label; if (rule.target === opt.value) o.selected = true; });
-    targetSel.addEventListener('change', async () => { rule.target = targetSel.value; await this.plugin.saveSettings(); });
-    const colorPicker = colorRow.createEl('input', { type:'color', cls:'cr-color-picker cr-adv-text-color' });
+    targetSel.addEventListener('change', async () => { rule.target = targetSel.value; await this.plugin.saveSettings(); this.plugin.applyColorsToActiveFile(); if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') setTimeout(() => this.plugin.applyColorsToAllEditors(), 10); });
+    
+    // Text color picker with reset button
+    const textColorContainer = colorRow.createDiv({ style: 'display: flex; gap: 0.3em; align-items: center; margin-top: 3px;' });
+    const colorPicker = textColorContainer.createEl('input', { type:'color', cls:'cr-color-picker cr-adv-text-color cr-adv-color-input' });
     colorPicker.value = rule.color || '#000000';
     colorPicker.title = 'Text Color';
-    colorPicker.addEventListener('change', async () => { rule.color = colorPicker.value; await this.plugin.saveSettings(); });
-    const bgPicker = colorRow.createEl('input', { type:'color', cls:'cr-bg-picker cr-adv-bg-color' });
+    colorPicker.addEventListener('change', async () => { rule.color = colorPicker.value; await this.plugin.saveSettings(); this.plugin.applyColorsToActiveFile(); if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') setTimeout(() => this.plugin.applyColorsToAllEditors(), 10); });
+    const colorResetBtn = textColorContainer.createEl('button', { cls: 'mod-ghost cr-adv-color-reset', style: 'padding: 4px 8px; font-size: 12px; height: auto; margin: 0 6px;' });
+    colorResetBtn.textContent = 'Reset';
+    colorResetBtn.title = 'Reset text color to none';
+    colorResetBtn.addEventListener('click', async () => { rule.color = null; colorPicker.value = '#000000'; await this.plugin.saveSettings(); this.plugin.applyColorsToActiveFile(); if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') setTimeout(() => this.plugin.applyColorsToAllEditors(), 10); });
+    
+    // Background color picker with reset button
+    const bgColorContainer = colorRow.createDiv({ style: 'display: flex; gap: 0.3em; align-items: center; margin-top: 3px;' });
+    const bgPicker = bgColorContainer.createEl('input', { type:'color', cls:'cr-bg-picker cr-adv-bg-color cr-adv-bg-input' });
     bgPicker.value = rule.bg || '#000000';
     bgPicker.title = 'Background Color';
-    bgPicker.addEventListener('change', async () => { rule.bg = bgPicker.value; await this.plugin.saveSettings(); });
+    bgPicker.addEventListener('change', async () => { rule.bg = bgPicker.value; await this.plugin.saveSettings(); this.plugin.applyColorsToActiveFile(); if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') setTimeout(() => this.plugin.applyColorsToAllEditors(), 10); });
+    const bgResetBtn = bgColorContainer.createEl('button', { cls: 'mod-ghost cr-adv-bg-reset', style: 'padding: 4px 8px; font-size: 12px; height: auto; margin: 0 6px;' });
+    bgResetBtn.textContent = 'Reset';
+    bgResetBtn.title = 'Reset background color to none';
+    bgResetBtn.addEventListener('click', async () => { rule.bg = null; bgPicker.value = '#000000'; await this.plugin.saveSettings(); this.plugin.applyColorsToActiveFile(); if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') setTimeout(() => this.plugin.applyColorsToAllEditors(), 10); });
     
     // Custom Name Section - AFTER color swatches
     contentEl.createEl('h4', { text: 'Rule Name (Optional)', cls: 'cr-adv-h4' });
@@ -3304,7 +3732,7 @@ class AdvancedRuleModal extends Modal {
     nameInput.style.width = '100%';
     nameInput.placeholder = 'Leave empty to use automatic naming';
     if (rule.name) nameInput.value = rule.name;
-    nameInput.addEventListener('change', async () => { rule.name = nameInput.value; await this.plugin.saveSettings(); document.dispatchEvent(new CustomEvent('ctc-adv-rules-changed')); });
+    nameInput.addEventListener('change', async () => { rule.name = nameInput.value; await this.plugin.saveSettings(); this.plugin.applyColorsToActiveFile(); if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') setTimeout(() => this.plugin.applyColorsToAllEditors(), 10); document.dispatchEvent(new CustomEvent('ctc-adv-rules-changed')); });
     const actionsRow = contentEl.createDiv({ cls: 'cr-adv-actions-row' });
     const deleteBtn = actionsRow.createEl('button', { cls: 'cr-adv-delete' });
     deleteBtn.textContent = 'Delete Rule';
@@ -3312,15 +3740,16 @@ class AdvancedRuleModal extends Modal {
       if (Array.isArray(this.plugin.settings.advancedRules)) {
         this.plugin.settings.advancedRules.splice(this.index, 1);
         await this.plugin.saveSettings();
+        this.plugin.applyColorsToActiveFile();
+        if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') setTimeout(() => this.plugin.applyColorsToAllEditors(), 10);
         document.dispatchEvent(new CustomEvent('ctc-adv-rules-changed'));
       }
       this.close();
     });
     const saveBtn = actionsRow.createEl('button', { cls: 'mod-cta cr-adv-save' });
     saveBtn.textContent = 'Save Rule';
-    saveBtn.addEventListener('click', () => { document.dispatchEvent(new CustomEvent('ctc-adv-rules-changed')); this.close(); });
+    saveBtn.addEventListener('click', () => { this.plugin.applyColorsToActiveFile(); if (this.plugin.settings.livePreviewColoring && typeof this.plugin.applyColorsToAllEditors === 'function') setTimeout(() => this.plugin.applyColorsToAllEditors(), 10); document.dispatchEvent(new CustomEvent('ctc-adv-rules-changed')); this.close(); });
   }
   onClose() { this.contentEl.empty(); }
 }
 
-// Modal to list rules and apply them to a specific table element
