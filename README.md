@@ -138,3 +138,6 @@ For manual installation, download the main.js, styles.css and manifest.json file
 Yes. Everything works on Obsidian Mobile.
 Manual coloring and rule based coloring both apply normally.
 
+### Cool Stuff
+Allows image embed / hyperlink as the match for column headers for coloring too!
+![Image Table with Column Colored](assets/image-table.png)
