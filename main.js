@@ -1,7 +1,7 @@
 const { Plugin, PluginSettingTab, Setting, Menu, ButtonComponent, Modal, setIcon } = require('obsidian');
 
 // Debug configuration - make it a getter so changes are reflected dynamically
-let IS_DEVELOPMENT = true;
+let IS_DEVELOPMENT = false;
 const debugLog = (...args) => IS_DEVELOPMENT && console.log('[CTC-DEBUG]', ...args);
 const debugWarn = (...args) => IS_DEVELOPMENT && console.warn('[CTC-WARN]', ...args);
 
