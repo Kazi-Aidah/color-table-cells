@@ -1,7 +1,7 @@
 const { Plugin, PluginSettingTab, Setting, Menu, ButtonComponent, Modal, setIcon } = require('obsidian');
 
 // Debug configuration - make it a getter so changes are reflected dynamically
-let IS_DEVELOPMENT = false;
+let IS_DEVELOPMENT = true;
 const debugLog = (...args) => IS_DEVELOPMENT && console.log('[CTC-DEBUG]', ...args);
 const debugWarn = (...args) => IS_DEVELOPMENT && console.warn('[CTC-WARN]', ...args);
 
@@ -2157,6 +2157,19 @@ module.exports = class TableColorPlugin extends Plugin {
         if (node.classList && (node.classList.contains('cm-cursor') || node.classList.contains('cm-line'))) {
           return; // Skip editor cursors
         }
+        // For links and images, extract meaningful text
+        if (node.tagName === 'A') {
+          // Extract link text (display text only, not the full href which may contain internal Obsidian paths)
+          const linkText = node.textContent.trim();
+          if (linkText) text += linkText;
+          return; // Don't recurse into link, we got the text
+        }
+        if (node.tagName === 'IMG') {
+          // Extract image alt text (not the src which may contain internal paths)
+          const alt = node.getAttribute('alt') || '';
+          if (alt) text += alt;
+          return; // Don't recurse into img
+        }
         // Include br tags as newlines
         if (node.tagName === 'BR') {
           text += '\n';
@@ -2286,6 +2299,8 @@ module.exports = class TableColorPlugin extends Plugin {
     const hdr = headerRowIndex >= 0 ? headerRowIndex : 0;
     const firstDataRowIndex = rows.findIndex(r => r.querySelector('td'));
     const fdr = firstDataRowIndex >= 0 ? firstDataRowIndex : 0;
+    debugLog(`[Coloring Rules Setup] Total rows=${rows.length}, maxCols=${maxCols}, headerRowIndex=${headerRowIndex}, hdr=${hdr}, fdr=${fdr}`);
+    debugLog(`[Header Row Text] Row ${hdr}:`, texts[hdr]);
 
     for (const rule of rules) {
       if (!rule || !rule.target || !rule.match) continue;
@@ -2330,7 +2345,9 @@ module.exports = class TableColorPlugin extends Plugin {
           let cond = false;
           if (rule.when === 'columnHeader') {
             const text = texts[hdr]?.[c] ?? '';
+            debugLog(`[Column Header Match] Rule: match=${rule.match}, value="${rule.value}", headerRow=${hdr}, col=${c}, text="${text}"`);
             cond = this.evaluateMatch(text, rule);
+            debugLog(`[Column Header Result] Column ${c}: match=${cond}`);
           } else {
             const colTexts = Array.from({ length: rows.length }, (_, r) => texts[r]?.[c]).filter(t => t !== undefined);
             if (rule.when === 'allCell') cond = colTexts.length > 0 && colTexts.every(t => this.evaluateMatch(t, rule));
@@ -2355,11 +2372,18 @@ module.exports = class TableColorPlugin extends Plugin {
     const hdr = headerRowIndex >= 0 ? headerRowIndex : 0;
     const firstDataRowIndex = rows.findIndex(r => r.querySelector('td'));
     const fdr = firstDataRowIndex >= 0 ? firstDataRowIndex : 0;
+    debugLog(`[Advanced Rules Setup] Total rows=${rows.length}, maxCols=${maxCols}, headerRowIndex=${headerRowIndex}, hdr=${hdr}, fdr=${fdr}`);
+    debugLog(`[Header Row Text] Row ${hdr}:`, texts[hdr]);
     const getCell = (r, c) => { const row = rows[r]; if (!row) return null; const cells = Array.from(row.querySelectorAll('td, th')); return cells[c] || null; };
 
     const evalCondCell = (r, c, cond) => this.evaluateMatch(texts[r]?.[c] ?? '', { match: cond.match, value: cond.value });
     const evalCondRow = (r, cond) => { const rowTexts = texts[r] || []; return rowTexts.some(t => this.evaluateMatch(t, { match: cond.match, value: cond.value })); };
-    const evalCondHeader = (c, cond) => this.evaluateMatch(texts[hdr]?.[c] ?? '', { match: cond.match, value: cond.value });
+    const evalCondHeader = (c, cond) => {
+      const headerText = texts[hdr]?.[c] ?? '';
+      const result = this.evaluateMatch(headerText, { match: cond.match, value: cond.value });
+      debugLog(`[Advanced Column Header] Col ${c}, match=${cond.match}, value="${cond.value}", headerText="${headerText}", result=${result}`);
+      return result;
+    };
 
     for (const rule of adv) {
       const logic = rule.logic || 'any';
