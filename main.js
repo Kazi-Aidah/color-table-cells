@@ -5,6 +5,10 @@ const {
   Menu,
   ButtonComponent,
   Modal,
+  Notice,
+  MarkdownRenderer,
+  Component,
+  requestUrl,
   setIcon,
   debounce,
 } = require("obsidian");
@@ -28,7 +32,6 @@ module.exports = class TableColorPlugin extends Plugin {
   undoStack = [];
   redoStack = [];
   maxStackSize = 50;
-  _changelogCommandRegistered = false;
 
   async onload() {
     // COMMAND PALETTE COMMANDS
@@ -170,6 +173,20 @@ module.exports = class TableColorPlugin extends Plugin {
       },
     });
 
+    this.addCommand({
+      id: "show-latest-release-notes",
+      name: "Show Latest Release Notes",
+      callback: async () => {
+        try {
+          new ChangelogModal(this.app, this).open();
+        } catch (e) {
+          try {
+            new Notice("Unable to open changelog modal.");
+          } catch (_) {}
+        }
+      },
+    });
+
     // REGEX PATTERN TESTER COMMAND
     // this.addCommand({
     //   id: 'open-regex-tester',
@@ -178,21 +195,6 @@ module.exports = class TableColorPlugin extends Plugin {
     //     new RegexTesterModal(this.app, this).open();
     //   }
     // });
-
-    try {
-      if (!this._changelogCommandRegistered) {
-        this.addCommand({
-          id: "show-latest-release-notes",
-          name: "Show latest release notes",
-          callback: async () => {
-            try {
-              new ReleaseNotesModal(this.app, this).open();
-            } catch (e) {}
-          },
-        });
-        this._changelogCommandRegistered = true;
-      }
-    } catch (e) {}
 
     // --- Live Preview Table Coloring logic ---
     this.applyColorsToAllEditors = () => {
@@ -1374,26 +1376,6 @@ module.exports = class TableColorPlugin extends Plugin {
     }
   }
 
-  async saveSettings() {
-    try {
-      const dataToSave = {
-        settings: this.settings,
-        cellData: this.cellData,
-      };
-
-      // If migration happened, remove old 'rules' field to avoid confusion
-      if (this._settingsMigrated) {
-        // Old 'rules' won't be in this.settings anymore, but ensure it's not re-added
-        delete dataToSave.settings.rules;
-        this._settingsMigrated = false; // Reset migration flag
-      }
-
-      await this.saveData(dataToSave);
-    } catch (error) {
-      throw error;
-    }
-  }
-
   async fetchAllReleases() {
     const allReleases = [];
     let page = 1;
@@ -1444,6 +1426,26 @@ module.exports = class TableColorPlugin extends Plugin {
       }
     }
     return allReleases;
+  }
+
+  async saveSettings() {
+    try {
+      const dataToSave = {
+        settings: this.settings,
+        cellData: this.cellData,
+      };
+
+      // If migration happened, remove old 'rules' field to avoid confusion
+      if (this._settingsMigrated) {
+        // Old 'rules' won't be in this.settings anymore, but ensure it's not re-added
+        delete dataToSave.settings.rules;
+        this._settingsMigrated = false; // Reset migration flag
+      }
+
+      await this.saveData(dataToSave);
+    } catch (error) {
+      throw error;
+    }
   }
 
   updateRecentColor(color) {
@@ -3648,146 +3650,6 @@ class ConditionRow {
 }
 
 // Settings Tab
-// Release Notes Modal - displays latest release notes from GitHub
-class ReleaseNotesModal extends Modal {
-  constructor(app, plugin) {
-    super(app);
-    this.plugin = plugin;
-    this._mdComp = null;
-  }
-
-  async onOpen() {
-    const { contentEl } = this;
-    contentEl.empty();
-
-    try {
-      this.modalEl.addClass("ctc-release-modal");
-    } catch (e) {}
-
-    const header = contentEl.createEl("div", { cls: "ctc-release-header" });
-
-    header.createEl("h2", {
-      text: "Color table cells",
-      cls: "ctc-release-title",
-    });
-
-    const link = header.createEl("a", {
-      text: "View on GitHub",
-      cls: "ctc-release-link",
-    });
-    link.href = "https://github.com/Kazi-Aidah/color-table-cells/releases";
-    link.target = "_blank";
-
-    const body = contentEl.createDiv({ cls: "ctc-release-body" });
-
-    body.createEl("div", {
-      text: "Loading releases…",
-      cls: "ctc-release-loading",
-    });
-
-    try {
-      const releases = await this.plugin.fetchAllReleases();
-
-      body.empty();
-
-      if (!Array.isArray(releases) || releases.length === 0) {
-        const noInfo = body.createEl("div", {
-          text: "No release information available.",
-          cls: "ctc-release-empty",
-        });
-        return;
-      }
-
-      for (const rel of releases) {
-        const meta = body.createDiv({ cls: "ctc-release-meta" });
-
-        meta.createEl("div", {
-          text: rel.name || rel.tag_name || "Release",
-          cls: "ctc-release-name",
-        });
-
-        try {
-          const dateRaw =
-            rel.published_at || rel.created_at || rel.release_date || null;
-          if (dateRaw) {
-            const dt = new Date(dateRaw);
-            const monthNames = [
-              "January",
-              "February",
-              "March",
-              "April",
-              "May",
-              "June",
-              "July",
-              "August",
-              "September",
-              "October",
-              "November",
-              "December",
-            ];
-            const formatted = `${dt.getFullYear()} ${monthNames[dt.getMonth()]} ${String(dt.getDate()).padStart(2, "0")}`;
-            meta.createEl("div", { text: formatted, cls: "ctc-release-date" });
-          }
-        } catch (e) {}
-
-        const notes = body.createDiv({
-          cls: "ctc-release-notes markdown-preview-view",
-        });
-        const md = rel.body || "No notes";
-
-        try {
-          const { MarkdownRenderer, Component } = require("obsidian");
-          if (!this._mdComp) {
-            try {
-              this._mdComp = new Component();
-            } catch (e) {
-              this._mdComp = null;
-            }
-          }
-          if (
-            MarkdownRenderer &&
-            typeof MarkdownRenderer.render === "function"
-          ) {
-            await MarkdownRenderer.render(
-              this.plugin.app,
-              md,
-              notes,
-              "",
-              this._mdComp || void 0,
-            );
-          } else {
-            throw new Error("MarkdownRenderer not available");
-          }
-        } catch (e) {
-          const fallback = notes.createEl("pre", {
-            cls: "ctc-release-notes-fallback",
-          });
-          fallback.textContent = md;
-        }
-      }
-    } catch (error) {
-      body.empty();
-      body.createEl("div", {
-        text: "Failed to load release notes.",
-        cls: "ctc-release-error",
-      });
-      debugWarn("Error fetching release notes:", error);
-    }
-  }
-
-  onClose() {
-    try {
-      if (this._mdComp && typeof this._mdComp.unload === "function") {
-        this._mdComp.unload();
-      }
-    } catch (e) {}
-    this._mdComp = null;
-    try {
-      this.contentEl.empty();
-    } catch (e) {}
-  }
-}
-
 class ColorTableSettingTab extends PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
@@ -3799,14 +3661,23 @@ class ColorTableSettingTab extends PluginSettingTab {
     containerEl.empty();
     containerEl.addClass("ctc-settings");
 
-    new Setting(containerEl)
-      .setName("Latest release notes")
+    const releaseNotesSettingEl = new Setting(containerEl)
+      .setName("Latest Release Notes")
       .setDesc("View the most recent plugin release notes")
       .addButton((btn) =>
-        btn
-          .setButtonText("Open changelog")
-          .onClick(() => new ReleaseNotesModal(this.app, this.plugin).open()),
+        btn.setButtonText("Open Changelog").onClick(() => {
+          try {
+            new ChangelogModal(this.app, this.plugin).open();
+          } catch (e) {
+            try {
+              new Notice("Unable to open changelog modal.");
+            } catch (_) {}
+          }
+        }),
       );
+    try {
+      releaseNotesSettingEl.settingEl.style.borderTop = "none";
+    } catch (e) {}
 
     // Toggle for Live Preview Table Coloring
     new Setting(containerEl)
@@ -5207,5 +5078,166 @@ class AdvancedRuleModal extends Modal {
   }
   onClose() {
     this.contentEl.empty();
+  }
+}
+
+class ChangelogModal extends Modal {
+  constructor(app, plugin) {
+    super(app);
+    this.plugin = plugin;
+    this._mdComp = null;
+  }
+  async onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    try {
+      this.modalEl.style.maxWidth = "900px";
+      this.modalEl.style.width = "900px";
+      this.modalEl.style.padding = "25px";
+    } catch (e) {}
+    const header = contentEl.createEl("div");
+    header.style.display = "flex";
+    header.style.alignItems = "center";
+    header.style.justifyContent = "space-between";
+    header.style.marginBottom = "0px";
+    header.style.paddingBottom = "16px";
+    header.style.borderBottom = "1px solid var(--divider-color)";
+    const title = header.createEl("h2", { text: "Color Table Cells" });
+    title.style.margin = "0";
+    title.style.fontSize = "1.5em";
+    title.style.fontWeight = "600";
+    const link = header.createEl("a", { text: "View on GitHub" });
+    link.href = "https://github.com/Kazi-Aidah/color-table-cells/releases";
+    link.target = "_blank";
+    link.style.fontSize = "0.9em";
+    link.style.opacity = "0.8";
+    link.style.transition = "opacity 0.2s";
+    link.addEventListener("mouseenter", () => (link.style.opacity = "1"));
+    link.addEventListener("mouseleave", () => (link.style.opacity = "0.8"));
+    const body = contentEl.createDiv();
+    body.style.maxHeight = "70vh";
+    body.style.overflow = "auto";
+    const loading = body.createEl("div", {
+      text: "Loading releases…",
+    });
+    loading.style.opacity = "0.7";
+    loading.style.fontSize = "0.95em";
+    loading.style.marginTop = "12px";
+    try {
+      const rels = await this.plugin.fetchAllReleases();
+      body.empty();
+      if (!Array.isArray(rels) || rels.length === 0) {
+        const noInfo = body.createEl("div", {
+          text: "No release information available.",
+        });
+        try {
+          noInfo.style.marginTop = "12px";
+        } catch (e) {}
+        return;
+      }
+      rels.forEach(async (rel) => {
+        const meta = body.createEl("div");
+        meta.style.marginBottom = "6px";
+        meta.style.borderBottom = "1px solid var(--divider-color)";
+        const releaseName = meta.createEl("div", {
+          text:
+            rel.name ||
+            rel.tag_name ||
+            "Release",
+        });
+        releaseName.style.fontSize = "2em";
+        releaseName.style.fontWeight = "900";
+        releaseName.style.marginTop = "12px";
+        releaseName.style.marginBottom = "12px";
+        releaseName.style.color = "var(--text-normal)";
+        try {
+          const dateRaw =
+            rel.published_at ||
+            rel.created_at ||
+            rel.release_date ||
+            null;
+          if (dateRaw) {
+            const dt = new Date(dateRaw);
+            const monthNames = [
+              "January",
+              "February",
+              "March",
+              "April",
+              "May",
+              "June",
+              "July",
+              "August",
+              "September",
+              "October",
+              "November",
+              "December",
+            ];
+            const formatted = `${dt.getFullYear()} ${
+              monthNames[dt.getMonth()]
+            } ${String(dt.getDate()).padStart(2, "0")}`;
+            const dateEl = meta.createEl("div", { text: formatted });
+            dateEl.style.display = "block";
+            dateEl.style.opacity = "0.8";
+            dateEl.style.fontSize = "0.9em";
+            dateEl.style.marginTop = "-4px";
+            dateEl.style.marginBottom = "16px";
+          }
+        } catch (_) {}
+        const notes = body.createEl("div");
+        notes.style.marginTop = "16px";
+        notes.addClass("markdown-preview-view");
+        notes.style.lineHeight = "1.6";
+        notes.style.fontSize = "0.95em";
+        try {
+          notes.style.padding = "0 var(--file-margin)";
+        } catch (e) {}
+        const md = rel.body || "No notes";
+        try {
+          if (!this._mdComp) {
+            try {
+              this._mdComp = new Component();
+            } catch (e) {
+              this._mdComp = null;
+            }
+          }
+          await MarkdownRenderer.render(
+            this.plugin.app,
+            md,
+            notes,
+            "",
+            this._mdComp || void 0,
+          );
+        } catch (e) {
+          const preEl = notes.createEl("pre");
+          preEl.style.whiteSpace = "pre-wrap";
+          preEl.style.wordWrap = "break-word";
+          preEl.style.backgroundColor = "var(--background-secondary)";
+          preEl.style.padding = "12px";
+          preEl.style.borderRadius = "4px";
+          preEl.style.fontSize = "0.9em";
+          preEl.style.lineHeight = "1.5";
+          preEl.textContent = md;
+        }
+      });
+    } catch (e) {
+      body.empty();
+      const failed = body.createEl("div", {
+        text: "Failed to load release notes.",
+      });
+      try {
+        failed.style.marginTop = "12px";
+      } catch (e2) {}
+    }
+  }
+  onClose() {
+    try {
+      if (this._mdComp && typeof this._mdComp.unload === "function") {
+        this._mdComp.unload();
+      }
+    } catch (e) {}
+    this._mdComp = null;
+    try {
+      this.contentEl.empty();
+    } catch (e) {}
   }
 }

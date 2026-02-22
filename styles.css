@@ -685,24 +685,14 @@ th[style*="background-color"]:hover {
 }
 
 .ctc-cr-delete-container {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  display: flex;
+  flex-wrap: wrap;
   gap: 0.5em;
 }
 
-@media (max-width: 900px) {
-  .ctc-cr-delete-container {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
-
-@media (max-width: 600px) {
-  .ctc-cr-delete-container {
-    grid-template-columns: 1fr;
-  }
-}
-
 .ctc-cr-delete-row {
+  flex: 1 1 0;
+  min-width: 0;
   padding: 0.75em;
   border: 1px solid #fb464c40;
   border-radius: 4px;
@@ -712,7 +702,14 @@ th[style*="background-color"]:hover {
   align-items: center;
 }
 
+@media (max-width: 600px) {
+  .ctc-cr-delete-row {
+    flex: 1 1 100%;
+  }
+}
+
 .ctc-cr-delete-row button.mod-warning {
+  width: 100%;
   background-color: var(--color-red, #fb464c);
   color: var(--background-primary);
   border: none;
@@ -738,4 +735,5 @@ th[style*="background-color"]:hover {
 
 .ctc-cr-adv-name-input {
   width: 100%;
+}
 }
