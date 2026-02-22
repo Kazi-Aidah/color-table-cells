@@ -175,7 +175,7 @@ module.exports = class TableColorPlugin extends Plugin {
 
     this.addCommand({
       id: "show-latest-release-notes",
-      name: "Show Latest Release Notes",
+      name: "Show latest release notes",
       callback: async () => {
         try {
           new ChangelogModal(this.app, this).open();
@@ -3662,10 +3662,10 @@ class ColorTableSettingTab extends PluginSettingTab {
     containerEl.addClass("ctc-settings");
 
     const releaseNotesSettingEl = new Setting(containerEl)
-      .setName("Latest Release Notes")
+      .setName("Latest release notes")
       .setDesc("View the most recent plugin release notes")
       .addButton((btn) =>
-        btn.setButtonText("Open Changelog").onClick(() => {
+        btn.setButtonText("Open changelog").onClick(() => {
           try {
             new ChangelogModal(this.app, this.plugin).open();
           } catch (e) {
@@ -3676,7 +3676,7 @@ class ColorTableSettingTab extends PluginSettingTab {
         }),
       );
     try {
-      releaseNotesSettingEl.settingEl.style.borderTop = "none";
+      releaseNotesSettingEl.settingEl.addClass("ctc-settings-release-notes");
     } catch (e) {}
 
     // Toggle for Live Preview Table Coloring
@@ -4569,6 +4569,7 @@ class ColorTableSettingTab extends PluginSettingTab {
         .setHeading();
       modal.contentEl.createEl("p", {
         text: "This will remove all manually colored cells (non-rule colors). This action cannot be undone.",
+        cls: "setting-item setting-item-name setting-item-description",
       });
       const btnRow = modal.contentEl.createDiv({
         cls: "ctc-modal-delete-buttons",
@@ -4610,6 +4611,7 @@ class ColorTableSettingTab extends PluginSettingTab {
         .setHeading();
       modal.contentEl.createEl("p", {
         text: `This will remove all ${Array.isArray(this.plugin.settings.coloringRules) ? this.plugin.settings.coloringRules.length : 0} coloring rules. This action cannot be undone.`,
+        cls: "setting-item setting-item-name setting-item-description",
       });
       const btnRow = modal.contentEl.createDiv({
         cls: "ctc-modal-delete-buttons",
@@ -4649,6 +4651,7 @@ class ColorTableSettingTab extends PluginSettingTab {
         .setHeading();
       modal.contentEl.createEl("p", {
         text: `This will remove all ${Array.isArray(this.plugin.settings.advancedRules) ? this.plugin.settings.advancedRules.length : 0} advanced rules. This action cannot be undone.`,
+        cls: "setting-item setting-item-name setting-item-description",
       });
       const btnRow = modal.contentEl.createDiv({
         cls: "ctc-modal-delete-buttons",
@@ -4731,15 +4734,15 @@ class AdvancedRuleModal extends Modal {
       color: null,
       bg: null,
     };
-    new Setting(contentEl)
-      .setName("Advanced rules builder")
-      .setHeading()
-      .settingEl.addClass("ctc-cr-adv-modal-heading");
+    contentEl.createEl("h3", {
+      text: "Advanced Rules Builder",
+      cls: "ctc-cr-adv-modal-heading",
+    });
     const logicRow = contentEl.createDiv({ cls: "ctc-cr-adv-logic" });
-    const logicLabel = logicRow.createEl("span", {
+    const logicLabel = logicRow.createEl("div", {
       cls: "ctc-cr-adv-logic-label",
     });
-    logicLabel.textContent = "Conditions match";
+    logicLabel.textContent = "Conditions Match";
     const logicButtons = logicRow.createDiv({
       cls: "ctc-cr-adv-logic-buttons",
     });
@@ -4904,7 +4907,7 @@ class AdvancedRuleModal extends Modal {
     renderConds();
     const addCondRow = contentEl.createDiv({ cls: "ctc-cr-adv-add-row" });
     const addCondBtn = addCondRow.createEl("button", {
-      cls: "mod-ghost ctc-cr-adv-add-btn",
+      cls: "mod-cta ctc-cr-adv-add-btn",
     });
     addCondBtn.textContent = "+ Add condition";
     addCondBtn.addEventListener("click", async () => {

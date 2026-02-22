@@ -16,6 +16,15 @@ th[style*="background-color"]:hover {
 .ctc-rule-delete-btn:hover { color: var(--interactive-accent); }
 
 .ctc-settings .setting-item input[type="text"] { padding: 4px 6px; min-width: 120px; }
+.ctc-settings .ctc-settings-release-notes { border-top: none; }
+
+.ctc-cr-adv-name-row {
+  width: 100%;
+}
+
+.ctc-cr-adv-name-input {
+  width: 100%;
+}
 
 .ctc-rule-controls { display: inline-flex; gap: 6px; align-items: center; margin-left: 8px; }
 .ctc-rule-controls .mod-cta, .ctc-rule-controls .mod-ghost { padding: 4px; }
@@ -365,7 +374,7 @@ th[style*="background-color"]:hover {
 .ctc-cr-adv-actions { margin-top: 10px; display: flex; justify-content: flex-end; }
 
 .ctc-cr-adv-modal { padding: 18px; }
-.ctc-cr-adv-modal-heading { margin: 0 0 12px 0; text-align: center; }
+.ctc-cr-adv-modal-heading { margin: -10px 0 26px 0; text-align: center; }
 .ctc-cr-adv-logic { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
 .ctc-cr-adv-logic-buttons { display: flex; gap: 8px; }
 .ctc-cr-adv-logic-label { color: var(--text-normal); }
@@ -375,7 +384,7 @@ th[style*="background-color"]:hover {
 .ctc-cr-adv-cond-row { display: flex; align-items: center; gap: 4px; }
 .ctc-cr-adv-cond-when, .ctc-cr-adv-cond-match { min-width: 160px; }
 .ctc-cr-adv-cond-value { flex: 1; min-width: 0; }
-.ctc-cr-adv-add-row { margin-top: 8px; }
+.ctc-cr-adv-add-row { margin-top: 8px; display: flex; justify-content: flex-end; }
 .ctc-cr-adv-add-btn { min-width: 140px; }
 .ctc-cr-adv-color-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
 .ctc-cr-adv-text-color-container,
@@ -389,11 +398,7 @@ th[style*="background-color"]:hover {
 .ctc-cr-adv-text-color, .ctc-cr-adv-bg-color { height: 2em; width: 2em; }
 .ctc-cr-adv-actions-row { margin-top: 12px; display: flex; justify-content: space-between; align-items: center; }
 .ctc-cr-adv-save { padding: auto; }
-.ctc-cr-adv-delete { background-color: #fb464c !important; border: none !important; }
-
-.ctc-cr-adv-actions-row { margin-top: 12px; display: flex; justify-content: space-between; align-items: center; }
-.ctc-cr-adv-save { padding: auto; }
-.ctc-cr-adv-delete { background-color: #fb464c !important; border: none !important; }
+.ctc-cr-adv-delete { background-color: #fb464c !important; border: none !important; color: var(--text-on-accent) !important; }
 
 /* Search input with left icon */
 .ctc-search-container {
@@ -650,7 +655,7 @@ th[style*="background-color"]:hover {
 
 /* --- */
 .ctc-cr-adv-modal-heading {
-    margin: -18px 0 24px 0;
+    margin: -18px 0 26px 0 !important;
     text-align: center;
 }
 
