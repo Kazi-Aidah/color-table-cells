@@ -5113,7 +5113,7 @@ class ChangelogModal extends Modal {
     header.style.marginBottom = "0px";
     header.style.paddingBottom = "16px";
     header.style.borderBottom = "1px solid var(--divider-color)";
-    const title = header.createEl("h2", { text: "Color Table Cells" });
+    const title = header.createEl("h2", { text: "Color table cells" });
     title.style.margin = "0";
     title.style.fontSize = "1.5em";
     title.style.fontWeight = "600";
