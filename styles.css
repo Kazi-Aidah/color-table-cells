@@ -56,6 +56,10 @@ th[style*="background-color"]:hover {
   flex-shrink: 0;
 }
 
+.ctc-modal-warning-heading .setting-item-description {
+  margin-top: 6px;
+}
+
 @media (max-width: 600px) {
   .ctc-modal-delete-buttons {
     flex-direction: column-reverse;
@@ -741,4 +745,22 @@ th[style*="background-color"]:hover {
 .ctc-cr-adv-name-input {
   width: 100%;
 }
+}
+
+
+.ctc-cr-delete-container {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+body:not(.is-mobile) .ctc-cr-delete-container {
+    flex-direction: row;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+body:not(.is-mobile) .ctc-cr-delete-row {
+    flex: 0 1 auto;
 }

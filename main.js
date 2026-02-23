@@ -4564,13 +4564,13 @@ class ColorTableSettingTab extends PluginSettingTab {
     });
     deleteManualBtn.addEventListener("click", () => {
       const modal = new Modal(this.app);
-      new Setting(modal.contentEl)
+      const heading = new Setting(modal.contentEl)
         .setName("Delete all manual colors?")
+        .setDesc(
+          "This will remove all manually colored cells (non-rule colors). This action cannot be undone.",
+        )
         .setHeading();
-      modal.contentEl.createEl("p", {
-        text: "This will remove all manually colored cells (non-rule colors). This action cannot be undone.",
-        cls: "setting-item setting-item-name setting-item-description",
-      });
+      heading.settingEl.classList.add("ctc-modal-warning-heading");
       const btnRow = modal.contentEl.createDiv({
         cls: "ctc-modal-delete-buttons",
       });
@@ -4606,13 +4606,17 @@ class ColorTableSettingTab extends PluginSettingTab {
     });
     deleteRulesBtn.addEventListener("click", () => {
       const modal = new Modal(this.app);
-      new Setting(modal.contentEl)
+      const heading = new Setting(modal.contentEl)
         .setName("Delete all coloring rules?")
+        .setDesc(
+          `This will remove all ${
+            Array.isArray(this.plugin.settings.coloringRules)
+              ? this.plugin.settings.coloringRules.length
+              : 0
+          } coloring rules. This action cannot be undone.`,
+        )
         .setHeading();
-      modal.contentEl.createEl("p", {
-        text: `This will remove all ${Array.isArray(this.plugin.settings.coloringRules) ? this.plugin.settings.coloringRules.length : 0} coloring rules. This action cannot be undone.`,
-        cls: "setting-item setting-item-name setting-item-description",
-      });
+      heading.settingEl.classList.add("ctc-modal-warning-heading");
       const btnRow = modal.contentEl.createDiv({
         cls: "ctc-modal-delete-buttons",
       });
@@ -4646,13 +4650,17 @@ class ColorTableSettingTab extends PluginSettingTab {
     });
     deleteAdvRulesBtn.addEventListener("click", () => {
       const modal = new Modal(this.app);
-      new Setting(modal.contentEl)
+      const heading = new Setting(modal.contentEl)
         .setName("Delete all advanced rules?")
+        .setDesc(
+          `This will remove all ${
+            Array.isArray(this.plugin.settings.advancedRules)
+              ? this.plugin.settings.advancedRules.length
+              : 0
+          } advanced rules. This action cannot be undone.`,
+        )
         .setHeading();
-      modal.contentEl.createEl("p", {
-        text: `This will remove all ${Array.isArray(this.plugin.settings.advancedRules) ? this.plugin.settings.advancedRules.length : 0} advanced rules. This action cannot be undone.`,
-        cls: "setting-item setting-item-name setting-item-description",
-      });
+      heading.settingEl.classList.add("ctc-modal-warning-heading");
       const btnRow = modal.contentEl.createDiv({
         cls: "ctc-modal-delete-buttons",
       });
@@ -4735,14 +4743,14 @@ class AdvancedRuleModal extends Modal {
       bg: null,
     };
     contentEl.createEl("h3", {
-      text: "Advanced Rules Builder",
+      text: "Advanced rules builder",
       cls: "ctc-cr-adv-modal-heading",
     });
     const logicRow = contentEl.createDiv({ cls: "ctc-cr-adv-logic" });
     const logicLabel = logicRow.createEl("div", {
       cls: "ctc-cr-adv-logic-label",
     });
-    logicLabel.textContent = "Conditions Match";
+    logicLabel.textContent = "Conditions match";
     const logicButtons = logicRow.createDiv({
       cls: "ctc-cr-adv-logic-buttons",
     });
