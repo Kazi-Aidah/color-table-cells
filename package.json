@@ -1,0 +1,21 @@
+{
+  "name": "obsidian-color-table-cells",
+  "version": "1.0.0",
+  "description": "Color your table cells through rules or simple right-click actions.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production"
+  },
+  "keywords": ["obsidian", "plugin"],
+  "author": "Kazi Aidah Haque",
+  "license": "MIT",
+  "peerDependencies": {
+    "obsidian": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "esbuild": "^0.21.0",
+    "typescript": "^5.4.0"
+  }
+}
