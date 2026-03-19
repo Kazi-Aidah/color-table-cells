@@ -4742,10 +4742,10 @@ class AdvancedRuleModal extends Modal {
       color: null,
       bg: null,
     };
-    contentEl.createEl("h3", {
-      text: "Advanced rules builder",
-      cls: "ctc-cr-adv-modal-heading",
-    });
+    new Setting(contentEl)
+      .setName("Advanced rules builder")
+      .setHeading()
+      .settingEl.addClass("ctc-cr-adv-modal-heading");
     const logicRow = contentEl.createDiv({ cls: "ctc-cr-adv-logic" });
     const logicLabel = logicRow.createEl("div", {
       cls: "ctc-cr-adv-logic-label",
@@ -4789,7 +4789,7 @@ class AdvancedRuleModal extends Modal {
     mkBtn("ANY", "any");
     mkBtn("ALL", "all");
     mkBtn("NONE", "none");
-    contentEl.createEl("h4", { text: "Conditions", cls: "ctc-cr-adv-h4" });
+    new Setting(contentEl).setName("Conditions").setHeading().settingEl.addClass("ctc-cr-adv-h4");
     const condsWrap = contentEl.createDiv({ cls: "ctc-cr-adv-conds-wrap" });
     const TARGET_OPTIONS = [
       { label: "Color cell", value: "cell" },
@@ -4931,7 +4931,7 @@ class AdvancedRuleModal extends Modal {
       renderConds();
     });
 
-    contentEl.createEl("h4", { text: "Then color", cls: "ctc-cr-adv-h4" });
+    new Setting(contentEl).setName("Then color").setHeading().settingEl.addClass("ctc-cr-adv-h4");
 
     const colorRow = contentEl.createDiv({
       cls: "ctc-cr-adv-color-row ctc-pretty-flex",
@@ -5031,10 +5031,7 @@ class AdvancedRuleModal extends Modal {
     });
 
     // Custom Name Section - AFTER color swatches
-    contentEl.createEl("h4", {
-      text: "Rule name (optional)",
-      cls: "ctc-cr-adv-h4",
-    });
+    new Setting(contentEl).setName("Rule name (optional)").setHeading().settingEl.addClass("ctc-cr-adv-h4");
     const nameRow = contentEl.createDiv({ cls: "ctc-cr-adv-name-row" });
     const nameInput = nameRow.createEl("input", {
       type: "text",
@@ -5102,65 +5099,37 @@ class ChangelogModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
     try {
-      this.modalEl.style.maxWidth = "900px";
-      this.modalEl.style.width = "900px";
-      this.modalEl.style.padding = "25px";
+      this.modalEl.addClass("ctc-release-modal");
     } catch (e) {}
-    const header = contentEl.createEl("div");
-    header.style.display = "flex";
-    header.style.alignItems = "center";
-    header.style.justifyContent = "space-between";
-    header.style.marginBottom = "0px";
-    header.style.paddingBottom = "16px";
-    header.style.borderBottom = "1px solid var(--divider-color)";
-    const title = header.createEl("h2", { text: "Color table cells" });
-    title.style.margin = "0";
-    title.style.fontSize = "1.5em";
-    title.style.fontWeight = "600";
-    const link = header.createEl("a", { text: "View on GitHub" });
+    const header = contentEl.createEl("div", { cls: "ctc-release-header" });
+    const title = header.createEl("h2", { text: "Color table cells", cls: "ctc-release-title" });
+    const link = header.createEl("a", { text: "View on GitHub", cls: "ctc-release-link" });
     link.href = "https://github.com/Kazi-Aidah/color-table-cells/releases";
     link.target = "_blank";
-    link.style.fontSize = "0.9em";
-    link.style.opacity = "0.8";
-    link.style.transition = "opacity 0.2s";
-    link.addEventListener("mouseenter", () => (link.style.opacity = "1"));
-    link.addEventListener("mouseleave", () => (link.style.opacity = "0.8"));
-    const body = contentEl.createDiv();
-    body.style.maxHeight = "70vh";
-    body.style.overflow = "auto";
+    const body = contentEl.createDiv({ cls: "ctc-release-body" });
     const loading = body.createEl("div", {
       text: "Loading releases…",
+      cls: "ctc-release-loading",
     });
-    loading.style.opacity = "0.7";
-    loading.style.fontSize = "0.95em";
-    loading.style.marginTop = "12px";
     try {
       const rels = await this.plugin.fetchAllReleases();
       body.empty();
       if (!Array.isArray(rels) || rels.length === 0) {
         const noInfo = body.createEl("div", {
           text: "No release information available.",
+          cls: "ctc-release-empty",
         });
-        try {
-          noInfo.style.marginTop = "12px";
-        } catch (e) {}
         return;
       }
       rels.forEach(async (rel) => {
-        const meta = body.createEl("div");
-        meta.style.marginBottom = "6px";
-        meta.style.borderBottom = "1px solid var(--divider-color)";
+        const meta = body.createEl("div", { cls: "ctc-release-meta" });
         const releaseName = meta.createEl("div", {
           text:
             rel.name ||
             rel.tag_name ||
             "Release",
+          cls: "ctc-release-name",
         });
-        releaseName.style.fontSize = "2em";
-        releaseName.style.fontWeight = "900";
-        releaseName.style.marginTop = "12px";
-        releaseName.style.marginBottom = "12px";
-        releaseName.style.color = "var(--text-normal)";
         try {
           const dateRaw =
             rel.published_at ||
@@ -5186,22 +5155,11 @@ class ChangelogModal extends Modal {
             const formatted = `${dt.getFullYear()} ${
               monthNames[dt.getMonth()]
             } ${String(dt.getDate()).padStart(2, "0")}`;
-            const dateEl = meta.createEl("div", { text: formatted });
-            dateEl.style.display = "block";
-            dateEl.style.opacity = "0.8";
-            dateEl.style.fontSize = "0.9em";
-            dateEl.style.marginTop = "-4px";
-            dateEl.style.marginBottom = "16px";
+            const dateEl = meta.createEl("div", { text: formatted, cls: "ctc-release-date" });
           }
         } catch (_) {}
-        const notes = body.createEl("div");
-        notes.style.marginTop = "16px";
+        const notes = body.createEl("div", { cls: "ctc-release-notes" });
         notes.addClass("markdown-preview-view");
-        notes.style.lineHeight = "1.6";
-        notes.style.fontSize = "0.95em";
-        try {
-          notes.style.padding = "0 var(--file-margin)";
-        } catch (e) {}
         const md = rel.body || "No notes";
         try {
           if (!this._mdComp) {
@@ -5219,14 +5177,7 @@ class ChangelogModal extends Modal {
             this._mdComp || void 0,
           );
         } catch (e) {
-          const preEl = notes.createEl("pre");
-          preEl.style.whiteSpace = "pre-wrap";
-          preEl.style.wordWrap = "break-word";
-          preEl.style.backgroundColor = "var(--background-secondary)";
-          preEl.style.padding = "12px";
-          preEl.style.borderRadius = "4px";
-          preEl.style.fontSize = "0.9em";
-          preEl.style.lineHeight = "1.5";
+          const preEl = notes.createEl("pre", { cls: "ctc-release-notes-fallback" });
           preEl.textContent = md;
         }
       });
@@ -5234,10 +5185,8 @@ class ChangelogModal extends Modal {
       body.empty();
       const failed = body.createEl("div", {
         text: "Failed to load release notes.",
+        cls: "ctc-release-error",
       });
-      try {
-        failed.style.marginTop = "12px";
-      } catch (e2) {}
     }
   }
   onClose() {
